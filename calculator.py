@@ -132,7 +132,10 @@ DEFAULT_INDIVIDUAL_FACTOR_UR = {
     # Zone), never given its own Individual Factor - see add_calculations().
     # A single constant factor for All India does not reproduce ground truth
     # exactly, confirming it must be built as a rollup, not a standalone factor.
-    "Delhi": {"U": 0.00, "R": 1.00},
+    "Delhi": {"U": 0.00, "R": 1.00},  # Confirmed intentional: this is Sagar's
+    # actual given value, not a placeholder. The zero-factor warning below will
+    # still flag it every run, but only as a visible confirmation, not an error
+    # to fix - Delhi Urban is meant to be 0 per Sagar.
     "Punjab_Haryana": {"U": 1.00, "R": 1.90},
     "Rajasthan": {"U": 1.32, "R": 1.24},
     "Uttar Pradesh": {"U": 2.10, "R": 1.87},
@@ -226,14 +229,17 @@ def get_period_list(df):
 ID_COLS = ["Format", "State_Zone", "Is_Zone", "TG_Segment", "Flag", "Brand_SKU_Item"]
 
 
-def _compute_units_sales(df, factor_lookup, default_factor, missing_factor_regions):
+def _compute_units_sales(df, factor_lookup, default_factor, missing_factor_regions, zero_factor_regions=None):
     """Compute Units Estd / Sales Derived columns in place for a (U or R only) dataframe."""
     periods = get_period_list(df)
 
     def lookup_factor(row):
         key = (row["State_Zone"], row["Urban_Rural"])
         if key in factor_lookup:
-            return factor_lookup[key]
+            val = factor_lookup[key]
+            if val == 0 and zero_factor_regions is not None:
+                zero_factor_regions.add(key)
+            return val
         missing_factor_regions.add(key)
         return default_factor
 
@@ -241,15 +247,23 @@ def _compute_units_sales(df, factor_lookup, default_factor, missing_factor_regio
 
     for period in periods:
         hh_col, val_col, nop_col = f"HH__{period}", f"Val__{period}", f"Avg NOP__{period}"
-        if hh_col not in df.columns or val_col not in df.columns or nop_col not in df.columns:
+        if hh_col not in df.columns or val_col not in df.columns:
             continue
         hh = pd.to_numeric(df[hh_col], errors="coerce")
         val = pd.to_numeric(df[val_col], errors="coerce")
-        nop = pd.to_numeric(df[nop_col], errors="coerce")
         factor = df["Individual_Factor"]
 
-        df[f"Units Estd__{period}"] = hh * nop * factor * 1000
+        # Sales Derived only needs Val and the factor - compute it whenever
+        # possible, independent of whether Avg NOP exists for this period.
         df[f"Sales Derived__{period}"] = factor * 1_000_000 * val
+
+        # Units Estd genuinely needs Avg NOP - only compute it when that
+        # column is actually present (e.g. Format B's self-computed annual
+        # period deliberately has no confirmed Avg NOP yet, so Units Estd is
+        # correctly left uncomputed for that period rather than guessed).
+        if nop_col in df.columns:
+            nop = pd.to_numeric(df[nop_col], errors="coerce")
+            df[f"Units Estd__{period}"] = hh * nop * factor * 1000
 
     return periods
 
@@ -288,6 +302,13 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     real states (rows with Is_Zone == False and State_Zone != "All India").
 
     zone_mapping: dict {Zone name: [State name, ...]}.
+
+    Returns (result, missing_factor_regions, unmapped_zones, zero_factor_regions).
+    zero_factor_regions flags any (State, Urban_Rural) whose Individual Factor
+    is exactly 0 - a real factor should never be truly zero, and a literal 0
+    silently zeroes out every Sales Derived/Units Estd value for that entire
+    state, with no other visible symptom (Value MS%/Units MS% just go blank
+    from the divide-by-zero guard). This is reported so it's never missed.
     """
     if factor_lookup is None:
         factor_lookup = build_factor_lookup()
@@ -296,6 +317,7 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
 
     df = df.copy()
     missing_factor_regions = set()
+    zero_factor_regions = set()
     unmapped_zones = set()
 
     # Any Is_Zone=True rows, and any "All India" rows, are ignored entirely
@@ -308,7 +330,7 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     non_ur_df = state_df[~ur_mask].copy()
     ur_raw_df = state_df[ur_mask].copy()
 
-    periods = _compute_units_sales(non_ur_df, factor_lookup, default_factor, missing_factor_regions)
+    periods = _compute_units_sales(non_ur_df, factor_lookup, default_factor, missing_factor_regions, zero_factor_regions)
 
     u_df = non_ur_df[non_ur_df["Urban_Rural"] == "U"]
     r_df = non_ur_df[non_ur_df["Urban_Rural"] == "R"]
@@ -330,7 +352,7 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     missing_ur_mask = ur_raw_df["Units Estd__" + periods[0]].isna() if periods else pd.Series(False, index=ur_raw_df.index)
     if missing_ur_mask.any():
         fallback = ur_raw_df[missing_ur_mask].drop(columns=metric_cols)
-        _compute_units_sales(fallback, factor_lookup, default_factor, missing_factor_regions)
+        _compute_units_sales(fallback, factor_lookup, default_factor, missing_factor_regions, zero_factor_regions)
         ur_raw_df.loc[missing_ur_mask, metric_cols] = fallback[metric_cols].values
 
     state_result = pd.concat([non_ur_df, ur_raw_df], ignore_index=True)
@@ -386,7 +408,7 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
             for i, k in enumerate(keys)
         ]
 
-    return result, missing_factor_regions, unmapped_zones
+    return result, missing_factor_regions, unmapped_zones, zero_factor_regions
 
 
 def build_company_summary(result_df):

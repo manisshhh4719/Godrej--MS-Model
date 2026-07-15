@@ -419,6 +419,17 @@ elif page == "factor":
 
     stat_card("States loaded", len(st.session_state.factor_df), PAGE_ACCENTS["factor"][0])
 
+    zero_rows = st.session_state.factor_df[
+        (st.session_state.factor_df["Individual_Factor_U"] == 0) |
+        (st.session_state.factor_df["Individual_Factor_R"] == 0)
+    ]
+    if len(zero_rows) > 0:
+        st.error(
+            f"{len(zero_rows)} state(s) have a factor of exactly 0, which will zero out ALL Sales Derived "
+            f"and Units Estd for that state/Urban_Rural, with no other warning sign: "
+            f"{zero_rows['State_Zone'].tolist()}. A real factor is never truly zero, fix this before running."
+        )
+
     st.write("")
     soft_card_open("Your Individual Factor list")
     st.session_state.factor_df = st.data_editor(
@@ -711,8 +722,10 @@ elif page == "run":
                             continue
                         zone_mapping.setdefault(zone, []).append(state)
 
-                    result_df, missing_regions, unmapped_zones = add_calculations(master_df, factor_lookup=factor_lookup, zone_mapping=zone_mapping)
+                    result_df, missing_regions, unmapped_zones, zero_factor_regions = add_calculations(master_df, factor_lookup=factor_lookup, zone_mapping=zone_mapping)
                     company_summary_df = build_company_summary(result_df)
+                    if zero_factor_regions:
+                        st.error(f"{len(zero_factor_regions)} region(s) have an Individual Factor of exactly 0, which zeroes out ALL Sales Derived/Units Estd for that state: {sorted(zero_factor_regions)}. Go to Individual Factor and fix this before trusting the output.")
                     if missing_regions:
                         st.warning(f"{len(missing_regions)} state region(s) had no Individual Factor and used the default (1.0): {sorted(missing_regions)}.")
                     if unmapped_zones:
