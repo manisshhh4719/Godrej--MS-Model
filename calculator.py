@@ -126,6 +126,13 @@ def find_potential_duplicates(item_list, threshold=DUPLICATE_THRESHOLD):
 # These were spot-checked against the ground truth file for Rajasthan and
 # landed within ~1% of the true value, so this table is a solid starting point.
 # Editable in the dashboard before running.
+# Zero factors that are CONFIRMED intentional (Sagar's actual given values,
+# not placeholders). The run page shows these as a quiet informational note
+# instead of the loud red zero-factor error. Any zero factor NOT in this set
+# still triggers the full red error, because an accidental 0 silently zeroes
+# out all Sales Derived / Units Estd for that state.
+KNOWN_INTENTIONAL_ZERO_FACTORS = {("Delhi", "U")}
+
 DEFAULT_INDIVIDUAL_FACTOR_UR = {
     # NOTE: "All India" is deliberately NOT listed here. It is always
     # auto-synthesized as the sum of every real state present (same as a
@@ -409,6 +416,68 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
         ]
 
     return result, missing_factor_regions, unmapped_zones, zero_factor_regions
+
+
+def build_rollup_coverage(result_df, zone_mapping=None):
+    """
+    Reports, for every rollup (All India and each mapped Zone) at every U/R
+    cut in every Format, how many member states actually contributed vs how
+    many exist in the data at all. Purely reads the finished result - it can
+    never change a number.
+
+    Why this exists: rollups are sums of whatever states are present. If a
+    state's sheet was de-selected or absent (e.g. only Telangana had a U+R
+    sheet), the rollup is still produced and labelled "All India" while
+    actually being one state. That must be reported loudly, not discovered
+    by the reader.
+
+    "Expected" for All India = every state present in that Format at ANY
+    U/R cut. "Expected" for a Zone = its mapped member states present in
+    that Format at any cut (members entirely absent from the data are
+    already reported separately via unmapped_zones and are not counted
+    here). A row is emitted whenever expected > 0, including when included
+    is 0 (the rollup cut then simply doesn't exist in the output).
+
+    States are identified by the Is_Zone flag, never by name matching -
+    "West Bengal" is a state and must never be confused with the "West"
+    zone.
+    """
+    cols = ["Format", "Rollup", "Urban_Rural", "States_Included",
+            "States_Expected", "Missing_States"]
+    if result_df is None or len(result_df) == 0:
+        return pd.DataFrame(columns=cols)
+    zone_mapping = zone_mapping or {}
+
+    df = result_df
+    is_zone = df["Is_Zone"] == True if "Is_Zone" in df.columns else pd.Series(False, index=df.index)  # noqa: E712
+    states_df = df[(~is_zone) & (df["State_Zone"] != "All India")]
+
+    rows = []
+    for fmt in sorted(states_df["Format"].dropna().unique()):
+        fsub = states_df[states_df["Format"] == fmt]
+        all_states = set(fsub["State_Zone"].unique())
+        if not all_states:
+            continue
+        for ur in ["U", "R", "U+R"]:
+            present = set(fsub[fsub["Urban_Rural"] == ur]["State_Zone"].unique())
+            missing = sorted(all_states - present)
+            rows.append({
+                "Format": fmt, "Rollup": "All India", "Urban_Rural": ur,
+                "States_Included": len(present), "States_Expected": len(all_states),
+                "Missing_States": ", ".join(missing),
+            })
+            for zone, members in zone_mapping.items():
+                expected = set(members) & all_states
+                if not expected:
+                    continue
+                contributing = expected & present
+                z_missing = sorted(expected - contributing)
+                rows.append({
+                    "Format": fmt, "Rollup": zone, "Urban_Rural": ur,
+                    "States_Included": len(contributing), "States_Expected": len(expected),
+                    "Missing_States": ", ".join(z_missing),
+                })
+    return pd.DataFrame(rows, columns=cols)
 
 
 def build_company_summary(result_df):

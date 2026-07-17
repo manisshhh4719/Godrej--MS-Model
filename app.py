@@ -4,6 +4,7 @@ import pandas as pd
 from cleaner import process_all_files, get_sheet_overview
 from calculator import (
     add_calculations, build_factor_lookup, DEFAULT_INDIVIDUAL_FACTOR_UR,
+    KNOWN_INTENTIONAL_ZERO_FACTORS, build_rollup_coverage,
     build_company_summary, DEFAULT_ZONE_MAPPING, STATE_TO_ZONE, compute_variance,
     smart_guess_companies, find_potential_duplicates,
 )
@@ -259,7 +260,21 @@ def get_cached_master_df():
         tuple(sorted((k, tuple(sorted(v))) for k, v in included_sheets_by_format.items())),
     )
     if st.session_state.get("master_df_sig") != sig:
-        master_df, _ = process_all_files(file_format_map, included_sheets_by_format=included_sheets_by_format)
+        try:
+            master_df, _ = process_all_files(file_format_map, included_sheets_by_format=included_sheets_by_format)
+        except Exception as e:
+            # A sheet whose layout matches none of the known formats is refused
+            # rather than guessed at (correct behaviour - guessing would read the
+            # wrong cells silently). But that must never dump a raw traceback on
+            # an unrelated page: show what to do about it instead.
+            st.error(
+                f"Could not read one of the selected sheets, so this page can't be built yet.\n\n"
+                f"Details: {e}\n\n"
+                f"Go to **Region Selection** and untick that sheet, then come back. "
+                f"All India and Zone sheets are never needed - those numbers are always "
+                f"rebuilt by summing the states you include."
+            )
+            st.stop()
         st.session_state.cached_master_df = master_df
         st.session_state.master_df_sig = sig
     return st.session_state.cached_master_df
@@ -380,7 +395,7 @@ elif page == "region":
             for o in get_sheet_overview(f):
                 o["Format"] = fmt
                 rows.append(o)
-        cols = ["Format", "Sheet_Name", "State_Zone", "Urban_Rural", "Is_Zone", "Is_AP_Tel", "Include"]
+        cols = ["Format", "Sheet_Name", "State_Zone", "Urban_Rural", "Is_Zone", "Is_All_India", "Is_AP_Tel", "Include"]
         new_df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
         st.session_state.sheet_selection_df = new_df
         st.session_state["sheet_selection_df__orig"] = new_df.copy()
@@ -402,12 +417,14 @@ elif page == "region":
     else:
         soft_card_open("Sheets in your uploaded files")
         st.caption(
-            "State sheets are selected by default. AP+Tel and Zone sheets (North, GCPL East, etc) start "
-            "unselected. Tick or untick any row to change what gets processed."
+            "State sheets are selected by default. AP+Tel, Zone sheets (North, GCPL East, etc) and "
+            "All India sheets start unselected. Zones and All India are always recalculated by summing "
+            "the states you include, so their own sheets are never used for the numbers. "
+            "Tick or untick any row to change what gets processed."
         )
         edited = st.data_editor(
             st.session_state.sheet_selection_df, use_container_width=True, key="sheet_selection_editor",
-            disabled=["Format", "Sheet_Name", "State_Zone", "Urban_Rural", "Is_Zone", "Is_AP_Tel"],
+            disabled=["Format", "Sheet_Name", "State_Zone", "Urban_Rural", "Is_Zone", "Is_All_India", "Is_AP_Tel"],
             height=420,
         )
         st.session_state.sheet_selection_df = edited
@@ -726,10 +743,32 @@ elif page == "run":
 
                     result_df, missing_regions, unmapped_zones, zero_factor_regions = add_calculations(master_df, factor_lookup=factor_lookup, zone_mapping=zone_mapping)
                     company_summary_df = build_company_summary(result_df)
+                    if zero_factor_regions:
+                        unexpected_zeros = set(zero_factor_regions) - KNOWN_INTENTIONAL_ZERO_FACTORS
+                        intentional_zeros = set(zero_factor_regions) & KNOWN_INTENTIONAL_ZERO_FACTORS
+                        if unexpected_zeros:
+                            st.error(f"{len(unexpected_zeros)} region(s) have an Individual Factor of exactly 0, which zeroes out ALL Sales Derived/Units Estd for that state: {sorted(unexpected_zeros)}. Go to Individual Factor and fix this before trusting the output.")
+                        if intentional_zeros:
+                            st.caption(f"Note: {', '.join(f'{s} ({u})' for s, u in sorted(intentional_zeros))} has an Individual Factor of 0 as per the given factor table, so its Sales Derived and Units Estd are 0 by design. This is expected, not an error.")
                     if missing_regions:
                         st.warning(f"{len(missing_regions)} state region(s) had no Individual Factor and used the default (1.0): {sorted(missing_regions)}.")
                     if unmapped_zones:
                         st.warning(f"{len(unmapped_zones)} Zone(s) have no member states present in the data and were NOT calculated: {sorted(unmapped_zones)}.")
+
+                    # Rollup coverage: warn loudly when a rollup is built from
+                    # fewer states than exist in the data (e.g. only one state
+                    # had a U+R sheet, so "All India (U+R)" is really just that
+                    # state). Read-only report - cannot change any number.
+                    coverage_df = build_rollup_coverage(result_df, zone_mapping=zone_mapping)
+                    gaps = coverage_df[coverage_df["States_Included"] < coverage_df["States_Expected"]]
+                    if len(gaps):
+                        st.warning(f"{len(gaps)} rollup cut(s) are built from FEWER states than exist in your data. Their numbers are partial, not complete rollups. Details below.")
+                        for _, g in gaps.head(8).iterrows():
+                            st.warning(f"{g['Rollup']} ({g['Urban_Rural']}) in {g['Format']}: built from {g['States_Included']} of {g['States_Expected']} states. Missing: {g['Missing_States']}.")
+                        if len(gaps) > 8:
+                            st.warning(f"...and {len(gaps) - 8} more partial rollup cut(s), see the full table below.")
+                    with st.expander("Rollup coverage (which states fed All India and each Zone)"):
+                        st.dataframe(coverage_df, use_container_width=True, hide_index=True)
                     st.success("Calculations complete.")
                 except Exception as e:
                     st.error(f"Calculation failed: {e}")

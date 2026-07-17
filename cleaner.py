@@ -98,6 +98,14 @@ def get_sheet_overview(file_path_or_bytes, exclude_keywords=None):
         sheet - see calculator.add_calculations)
       - AP+Tel-style combined sheets -> excluded (avoids double counting
         with Andhra Pradesh excl Tela + Telangana reported separately)
+      - "All India" sheets -> excluded, for exactly the same reason as Zone
+        sheets: calculator.add_calculations always rebuilds All India as the
+        sum of every real state present and explicitly discards any raw
+        "All India" rows, so reading that sheet is wasted work whose result
+        is thrown away. Leaving it ticked also risks a hard failure on files
+        (e.g. Henna) whose All India sheet uses a different layout to the
+        state sheets, for no benefit whatsoever. It is still listed here and
+        can be ticked manually, but it will never affect the numbers.
     """
     if hasattr(file_path_or_bytes, "seek"):
         file_path_or_bytes.seek(0)
@@ -106,12 +114,14 @@ def get_sheet_overview(file_path_or_bytes, exclude_keywords=None):
     for sheet_name in wb.sheetnames:
         state_or_zone, urban_rural, is_zone = parse_region_sheet_name(sheet_name)
         is_ap_tel = is_excluded_sheet(sheet_name, exclude_keywords=exclude_keywords)
-        default_include = (not is_zone) and (not is_ap_tel)
+        is_all_india = str(state_or_zone).strip().lower() == "all india"
+        default_include = (not is_zone) and (not is_ap_tel) and (not is_all_india)
         overview.append({
             "Sheet_Name": sheet_name,
             "State_Zone": state_or_zone,
             "Urban_Rural": urban_rural,
             "Is_Zone": is_zone,
+            "Is_All_India": is_all_india,
             "Is_AP_Tel": is_ap_tel,
             "Include": default_include,
         })

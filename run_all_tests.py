@@ -843,6 +843,106 @@ try:
 except ImportError:
     print("  SKIP (streamlit AppTest not available in this environment)")
 
+
+
+print("=" * 70)
+print("TEST GROUP 27: All India sheets auto-unticked (Henna crash fix)")
+print("=" * 70)
+from cleaner import get_sheet_overview as _gso27
+import openpyxl as _op27, io as _io27
+
+def _mk_wb27(names):
+    wb = _op27.Workbook()
+    wb.remove(wb.active)
+    for n in names:
+        wb.create_sheet(n)
+    b = _io27.BytesIO()
+    wb.save(b)
+    b.seek(0)
+    return b
+
+_ov27 = {o["Sheet_Name"]: o for o in _gso27(_mk_wb27([
+    "All India U+R", "All India Urban", "All India Rural",
+    "Maharashtra (U)", "Rajasthan (U+R)", "North (U+R)",
+]))}
+
+check("All India U+R sheet is auto-unticked", _ov27["All India U+R"]["Include"] is False)
+check("All India Urban sheet is auto-unticked", _ov27["All India Urban"]["Include"] is False)
+check("All India Rural sheet is auto-unticked", _ov27["All India Rural"]["Include"] is False)
+check("All India sheets flagged with Is_All_India", all(
+    _ov27[n]["Is_All_India"] is True for n in ["All India U+R", "All India Urban", "All India Rural"]))
+check("Real state sheets are still ticked by default (no regression)",
+      _ov27["Maharashtra (U)"]["Include"] is True and _ov27["Rajasthan (U+R)"]["Include"] is True)
+check("State sheets are NOT flagged as All India",
+      _ov27["Maharashtra (U)"]["Is_All_India"] is False)
+check("Zone sheets still auto-unticked (no regression)", _ov27["North (U+R)"]["Include"] is False)
+
+# The whole point: excluding the All India sheet must not change any number,
+# because add_calculations rebuilds All India from states and discards raw rows.
+_m27, _ = process_all_files({"SHC": RAW}, verbose=False)
+_r27, _, _, _ = add_calculations(_m27)
+_ai27 = _r27[_r27["State_Zone"] == "All India"]
+check("All India still produced even with no All India sheet read", len(_ai27) > 0,
+      f"got {len(_ai27)} All India rows")
+
+
+
+print("=" * 70)
+print("TEST GROUP 28: Rollup coverage safeguard + intentional zero factors")
+print("=" * 70)
+from calculator import build_rollup_coverage, KNOWN_INTENTIONAL_ZERO_FACTORS
+
+check("Delhi (U) is the only known-intentional zero factor",
+      KNOWN_INTENTIONAL_ZERO_FACTORS == {("Delhi", "U")})
+
+# --- Scenario 1: full coverage -> zero gaps ---
+_m28, _ = process_all_files({"SHC": RAW}, verbose=False)
+_r28, _, _, _ = add_calculations(_m28)
+_cov28 = build_rollup_coverage(_r28, zone_mapping={})
+_gaps28 = _cov28[_cov28["States_Included"] < _cov28["States_Expected"]]
+check("Full-coverage run reports zero gaps (no false alarms)", len(_gaps28) == 0,
+      f"gaps: {_gaps28.to_dict('records') if len(_gaps28) else 'none'}")
+check("Coverage rows produced for all 3 UR cuts",
+      set(_cov28["Urban_Rural"]) == {"U", "R", "U+R"})
+
+# --- Scenario 2: Sagar's exact situation - only one state has U+R ---
+_sag = _r28[~((_r28["Urban_Rural"] == "U+R") & (_r28["State_Zone"] != "Rajasthan"))].copy()
+# build a 2-state world: duplicate Rajasthan as a fake second state with U and R only
+_fake = _r28[(_r28["State_Zone"] == "Rajasthan") & (_r28["Urban_Rural"].isin(["U", "R"]))].copy()
+_fake["State_Zone"] = "Testland"
+_two = pd.concat([_sag, _fake], ignore_index=True)
+_cov2 = build_rollup_coverage(_two, zone_mapping={})
+_ur_row = _cov2[(_cov2["Rollup"] == "All India") & (_cov2["Urban_Rural"] == "U+R")].iloc[0]
+check("Partial U+R coverage detected (1 of 2 states)",
+      _ur_row["States_Included"] == 1 and _ur_row["States_Expected"] == 2,
+      f"included={_ur_row['States_Included']} expected={_ur_row['States_Expected']}")
+check("The missing state is named", _ur_row["Missing_States"] == "Testland")
+_u_row = _cov2[(_cov2["Rollup"] == "All India") & (_cov2["Urban_Rural"] == "U")].iloc[0]
+check("U cut with full coverage NOT flagged", _u_row["States_Included"] == _u_row["States_Expected"])
+
+# --- Scenario 3: the West Bengal / West zone name trap ---
+_wb = _r28[_r28["Urban_Rural"].isin(["U", "R", "U+R"])].copy()
+_wb["State_Zone"] = _wb["State_Zone"].replace({"Rajasthan": "West Bengal"})
+_wb.loc[_wb["State_Zone"] == "All India", "State_Zone"] = "All India"
+_cov3 = build_rollup_coverage(_wb, zone_mapping={"West": ["Maharashtra", "Gujarat"]})
+_ai3 = _cov3[_cov3["Rollup"] == "All India"]
+check("West Bengal counted as a state, never confused with West zone",
+      all(_ai3["States_Expected"] >= 1) and "West Bengal" not in set(_cov3["Rollup"]))
+check("Zone with no members present in data produces no coverage row (matches unmapped_zones behaviour)",
+      (_cov3["Rollup"] == "West").sum() == 0)
+
+# --- Scenario 4: zone coverage counts only mapped members ---
+_cov4 = build_rollup_coverage(_two, zone_mapping={"North": ["Rajasthan", "Testland"]})
+_n_ur = _cov4[(_cov4["Rollup"] == "North") & (_cov4["Urban_Rural"] == "U+R")].iloc[0]
+check("Zone U+R partial coverage detected", _n_ur["States_Included"] == 1 and _n_ur["States_Expected"] == 2)
+_n_u = _cov4[(_cov4["Rollup"] == "North") & (_cov4["Urban_Rural"] == "U")].iloc[0]
+check("Zone U full coverage not flagged", _n_u["States_Included"] == 2)
+
+# --- Coverage function must never alter the result ---
+_before = _r28.copy()
+build_rollup_coverage(_r28, zone_mapping={"North": ["Rajasthan"]})
+check("Coverage report leaves result_df completely untouched", _r28.equals(_before))
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)
