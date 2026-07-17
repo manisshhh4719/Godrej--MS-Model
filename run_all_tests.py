@@ -943,6 +943,56 @@ _before = _r28.copy()
 build_rollup_coverage(_r28, zone_mapping={"North": ["Rajasthan"]})
 check("Coverage report leaves result_df completely untouched", _r28.equals(_before))
 
+
+
+print("=" * 70)
+print("TEST GROUP 29: Format B without a 'Process Period' row (Henna layout)")
+print("=" * 70)
+from cleaner import find_format_b_signature as _fbs29
+import openpyxl as _op29, io as _io29
+
+# Variant 1: the Creme-style block (Process Period present)
+check("Creme-style block still detected", _fbs29([("Process Period", "2025 Jun To 2026 May")]) is True)
+# Variant 2: the Henna-style block (no Process Period, starts at Universe)
+check("Henna-style block detected (Universe + With Growth Factor)",
+      _fbs29([("Universe", "With Growth Factor"), ("Measure", "Households in 000s")]) is True)
+# Must NOT be too loose
+check("'Universe' alone is NOT enough (no false positive)",
+      _fbs29([("Universe", None)]) is False)
+check("'Universe' with an unrelated partner cell is NOT enough",
+      _fbs29([("Universe", "Rajasthan")]) is False)
+check("Empty / junk rows are not a Format B signature",
+      _fbs29([(None, None), ("foo", "bar")]) is False)
+
+# The real files must still detect as their own format (no cross-contamination)
+_wbA29 = _op29.load_workbook(RAW, data_only=True, read_only=True)
+_rowsA29 = list(_wbA29["Rajasthan (U+R)"].iter_rows(values_only=True))
+check("Format A file still detected as A (not stolen by widened B signature)",
+      detect_sheet_raw_format(_rowsA29) == "A")
+check("Format A file does not match the widened Format B signature",
+      _fbs29(_rowsA29) is False)
+
+if os.path.exists(FORMAT_C_FILE):
+    _wbC29 = _op29.load_workbook(FORMAT_C_FILE, data_only=True, read_only=True)
+    _rowsC29 = list(_wbC29["Maharashtra(U+R) - SHC"].iter_rows(values_only=True))
+    check("Format C file still detected as C (not stolen by widened B signature)",
+          detect_sheet_raw_format(_rowsC29) == "C")
+    check("Format C file does not match the widened Format B signature",
+          _fbs29(_rowsC29) is False)
+
+# End-to-end: a real Format B file with its 'Process Period' row deleted (=
+# exactly the Henna layout) must parse to identical data.
+if os.path.exists(FORMAT_B_FILE):
+    _base29, _ = process_workbook(FORMAT_B_FILE, "Creme")
+    _wb29 = _op29.load_workbook(FORMAT_B_FILE)
+    _wb29[_wb29.sheetnames[0]].delete_rows(1)
+    _buf29 = _io29.BytesIO(); _wb29.save(_buf29); _buf29.seek(0)
+    _henna29, _ = process_workbook(_buf29, "Henna")
+    check("Henna-style file (no Process Period row) parses without error", len(_henna29) > 0)
+    _cols29 = [c for c in _base29.columns if c != "Format"]
+    check("Henna-style parse is byte-identical to the Creme-style baseline",
+          _base29[_cols29].reset_index(drop=True).equals(_henna29[_cols29].reset_index(drop=True)))
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)

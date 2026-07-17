@@ -410,17 +410,36 @@ def classify_flag_format_b(product_name):
     return "SKU"
 
 
-def find_format_b_signature(rows, max_scan=5):
+def find_format_b_signature(rows, max_scan=6):
     """
-    Format B sheets always start with a 'Process Period' row (e.g.
-    'Process Period' | '2025 Jun To 2026 May'), a marker unique to this
-    format, not present in either Format A or Format C. Checked first so it
-    can never be confused with the other two.
+    Format B sheets open with a small header block that is unique to this
+    format and present in neither Format A nor Format C (both of which start
+    with a 'TG'/'Customer Segment' + 'Format' + 'Grammage' style column
+    header instead). Checked first so it can never be confused with them.
+
+    Two accepted variants of that block, both seen in real Kantar files:
+
+      1. A 'Process Period' row (e.g. 'Process Period' | '2025 Jun To
+         2026 May') - the Creme-style files.
+      2. NO 'Process Period' row at all, starting directly with the
+         'Universe' | 'With Growth Factor' row - the Henna-style files.
+         Structurally these are identical to variant 1 with the first row
+         removed, so they parse through exactly the same path; only the
+         signature row differs.
+
+    Matching on 'Universe' alone would be too loose, so variant 2 requires
+    the 'With Growth Factor' partner cell beside it.
     """
     for i in range(min(max_scan, len(rows))):
         row = rows[i]
-        if row and row[0] is not None and str(row[0]).strip().lower() == "process period":
+        if not row or row[0] is None:
+            continue
+        first = str(row[0]).strip().lower()
+        if first == "process period":
             return True
+        if first == "universe" and len(row) > 1 and row[1] is not None:
+            if "growth factor" in str(row[1]).strip().lower():
+                return True
     return False
 
 
