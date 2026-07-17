@@ -993,6 +993,61 @@ if os.path.exists(FORMAT_B_FILE):
     check("Henna-style parse is byte-identical to the Creme-style baseline",
           _base29[_cols29].reset_index(drop=True).equals(_henna29[_cols29].reset_index(drop=True)))
 
+
+
+print("=" * 70)
+print("TEST GROUP 30: Upload page - format name registers on the FIRST enter")
+print("=" * 70)
+try:
+    from streamlit.testing.v1 import AppTest as _AT30
+    import warnings as _w30; _w30.filterwarnings("ignore")
+
+    class _FakeFile30:
+        def __init__(self, name, size=1000):
+            self.name = name
+            self.size = size
+        def seek(self, *a, **k):
+            pass
+
+    _at30 = _AT30.from_file("app.py", default_timeout=120)
+    _at30.session_state["staged_files"] = {
+        "KPI-SHC.xlsx": [_FakeFile30("KPI-SHC.xlsx"), ""],
+        "KPI-Henna.xlsx": [_FakeFile30("KPI-Henna.xlsx"), ""],
+    }
+    _at30.session_state["current_page"] = "upload"
+    _at30.run()
+
+    def _cap30(a):
+        return [c.value for c in a.sidebar.caption]
+
+    check("Upload page: starts with 0 files", any("0 file(s) added" in c for c in _cap30(_at30)))
+
+    # The actual bug: this used to need TWO edits before anything updated.
+    _at30.text_input[0].set_value("SHC")
+    _at30.run()
+    check("Format map updated after a single edit", "SHC" in _at30.session_state["file_format_map"])
+    check("SIDEBAR updated after a single edit (no second keystroke needed)",
+          any("1 file(s) added" in c and "SHC" in c for c in _cap30(_at30)),
+          f"sidebar showed: {_cap30(_at30)}")
+
+    _at30.text_input[1].set_value("Henna")
+    _at30.run()
+    check("Second file also registers on its first edit",
+          any("2 file(s) added" in c for c in _cap30(_at30)))
+
+    _at30.text_input[0].set_value("")
+    _at30.run()
+    check("Clearing a format takes effect immediately",
+          any("1 file(s) added" in c and "Henna" in c for c in _cap30(_at30)))
+
+    _at30.text_input[0].set_value("   ")
+    _at30.run()
+    check("Whitespace-only format is ignored, creates no phantom entry",
+          len(_at30.session_state["file_format_map"]) == 1)
+    check("Upload page raises no exception through all of this", len(_at30.exception) == 0)
+except ImportError:
+    print("  SKIP (streamlit AppTest not available in this environment)")
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)

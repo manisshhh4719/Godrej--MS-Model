@@ -310,6 +310,33 @@ if "file_format_map" not in st.session_state:
 if "current_page" not in st.session_state:
     st.session_state.current_page = "upload"
 
+
+def sync_file_format_map():
+    """Rebuild file_format_map from the staged files + whatever is currently
+    typed in each Format box.
+
+    This MUST run before the sidebar and the page body render. Streamlit draws
+    the sidebar first, and the upload page used to only rebuild this map near
+    the bottom of its own body - so the sidebar caption and the 'Files added'
+    card were always showing the PREVIOUS run's value. Typing a format and
+    hitting enter appeared to do nothing until you edited the box a second
+    time and triggered another rerun. Reading the text_input's own session
+    state key here (which already holds the latest typed value) fixes that,
+    so one enter is enough.
+    """
+    staged = st.session_state.get("staged_files", {})
+    fmap = {}
+    for fname, entry in staged.items():
+        typed = st.session_state.get(f"fmt_{fname}", entry[1])
+        typed = (typed or "").strip()
+        entry[1] = typed  # keep the staged copy in sync so it survives reruns
+        if typed:
+            fmap[typed] = entry[0]
+    st.session_state.file_format_map = fmap
+
+
+sync_file_format_map()
+
 # ============================== SIDEBAR NAV ==============================
 with st.sidebar:
     st.markdown('<div class="sidebar-brand">Godrej Market<br/>Share Model</div>', unsafe_allow_html=True)
@@ -365,7 +392,7 @@ if page == "upload":
         with col2:
             fmt = st.text_input("Format", value=fmt_val, key=f"fmt_{fname}", label_visibility="collapsed",
                                  placeholder=f"Type a format, e.g. {KNOWN_FORMATS[0]}")
-            st.session_state.staged_files[fname][1] = fmt
+            st.session_state.staged_files[fname][1] = (fmt or "").strip()
         with col3:
             if st.button("Remove", key=f"remove_{fname}"):
                 to_remove = fname
@@ -373,11 +400,9 @@ if page == "upload":
         del st.session_state.staged_files[to_remove]
         st.rerun()
 
-    file_format_map = {}
-    for fname, (fobj, fmt_val) in st.session_state.staged_files.items():
-        if fmt_val.strip():
-            file_format_map[fmt_val.strip()] = fobj
-    st.session_state.file_format_map = file_format_map
+    # Same sync as the one that already ran before the sidebar - re-run it here
+    # so any format typed during THIS run is reflected immediately.
+    sync_file_format_map()
     soft_card_close()
 
     nav_footer("upload")
