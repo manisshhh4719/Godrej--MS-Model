@@ -538,7 +538,7 @@ check("Quarter code translates to canonical label", _format_c_period_to_canonica
 check("MAT code translates to canonical label", _format_c_period_to_canonical("MAT Mar24") == "2023 Apr - 2024 Mar")
 check("Invalid period code returns None (not silently wrong)", _format_c_period_to_canonical("garbage") is None)
 
-FORMAT_C_FILE = '/mnt/user-data/uploads/Sample_template_-_C.xlsx'
+FORMAT_C_FILE = 'sample_data/Sample_template_-_C.xlsx'
 import os
 if os.path.exists(FORMAT_C_FILE):
     shc_sheets = {'Maharashtra(U+R) - SHC', 'Maharasthra(R) - SHC', 'Maharasthra(U) - SHC'}
@@ -661,7 +661,7 @@ check("Others detected via OTH. pattern", classify_flag_format_b(" OTH.BRDED SOM
 check("Chronological sort key orders correctly (not alphabetically)",
       sorted(["2025 Aug", "2025 Jun", "2025 Dec"], key=_month_period_sort_key) == ["2025 Jun", "2025 Aug", "2025 Dec"])
 
-FORMAT_B_FILE = '/mnt/user-data/uploads/Sample.xlsx'
+FORMAT_B_FILE = 'sample_data/Sample_format_B.xlsx'
 if os.path.exists(FORMAT_B_FILE):
     df_b, sku_b = process_workbook(FORMAT_B_FILE, 'Creme')
     check("Format B: rows extracted", len(df_b) > 0, f"got {len(df_b)}")
@@ -780,6 +780,68 @@ if os.path.exists(FORMAT_B_FILE):
     os.remove(synth_path)
 else:
     print("  SKIP (Format B sample file not present in this environment)")
+
+
+
+print("=" * 70)
+print("TEST GROUP 26: KPI Explorer page (numbers must match pipeline exactly)")
+print("=" * 70)
+try:
+    from streamlit.testing.v1 import AppTest
+    import warnings as _w; _w.filterwarnings("ignore")
+
+    _m26, _ = process_all_files({"SHC": RAW}, verbose=False)
+    _r26, _, _, _ = add_calculations(_m26)
+    _cs26 = build_company_summary(_r26)
+
+    _at = AppTest.from_file("app.py", default_timeout=120)
+    _at.session_state["result_df"] = _r26
+    _at.session_state["company_summary_df"] = _cs26
+    _at.session_state["current_page"] = "explorer"
+    _at.run()
+    check("Explorer: page loads with no exception", len(_at.exception) == 0)
+
+    _at.selectbox[0].select("GODREJ CONSUMER PRODS")
+    _at.selectbox[1].select("Value MS%")
+    _at.selectbox[2].select("All India")
+    _at.selectbox[3].select("U+R")
+    _at.selectbox[4].select("TOTAL")
+    _per26 = "2025 Apr - 2026 Mar"
+    _at.selectbox[5].select(_per26)
+    _at.run()
+    check("Explorer: company single-period selection runs clean", len(_at.exception) == 0)
+
+    _exp26 = _cs26[(_cs26.Company == "GODREJ CONSUMER PRODS") & (_cs26.State_Zone == "All India")
+                   & (_cs26.Urban_Rural == "U+R") & (_cs26.TG_Segment == "TOTAL")]["Value MS%__" + _per26].iloc[0]
+    _cards26 = [str(md.value) for md in _at.markdown if "stat-card" in str(md.value)]
+    _shown26 = _cards26[-1].split('stat-value">')[1].split("<")[0] if _cards26 else ""
+    check("Explorer: company Value MS% shown matches pipeline exactly",
+          _shown26 == f"{_exp26*100:,.2f}%", f"shown={_shown26} expected={_exp26*100:,.2f}%")
+
+    _at.radio[0].set_value("Brand")
+    _at.run()
+    _gb26 = [b for b in _at.selectbox[0].options if "SELFIE" in b.upper()][0]
+    _at.selectbox[0].select(_gb26)
+    _at.selectbox[1].select("Sales Derived")
+    _at.selectbox[2].select("Rajasthan")
+    _at.selectbox[3].select("U")
+    _at.selectbox[4].select("TOTAL")
+    _at.selectbox[5].select(_at.selectbox[5].options[0])  # All periods (trend)
+    _at.run()
+    check("Explorer: brand trend mode runs clean", len(_at.exception) == 0)
+
+    _sub26 = _r26[(_r26.Brand_SKU_Item == _gb26) & (_r26.State_Zone == "Rajasthan")
+                  & (_r26.Urban_Rural == "U") & (_r26.TG_Segment == "TOTAL")
+                  & (_r26.Flag.isin(["Brand", "Others"]))]
+    _shown_df26 = _at.dataframe[0].value
+    _all_ok26 = len(_shown_df26) == 15
+    for _, _row26 in _shown_df26.iterrows():
+        _e26 = _sub26["Sales Derived__" + _row26.Period].iloc[0]
+        if f"{_e26:,.2f}" != _row26["Sales Derived"]:
+            _all_ok26 = False
+    check("Explorer: all 15 brand trend datapoints match pipeline exactly", _all_ok26)
+except ImportError:
+    print("  SKIP (streamlit AppTest not available in this environment)")
 
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")

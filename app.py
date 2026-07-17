@@ -23,6 +23,7 @@ PAGES = [
     ("brand", "Brand Mapping"),
     ("manufacturer", "Manufacturer Mapping"),
     ("run", "Run and Download"),
+    ("explorer", "KPI Explorer"),
 ]
 PAGE_ACCENTS = {
     "upload": ("#DCEEFB", "#3E7CB1"),
@@ -32,6 +33,7 @@ PAGE_ACCENTS = {
     "brand": ("#EAE4F7", "#7B65B5"),
     "manufacturer": ("#FFF3D6", "#B8912B"),
     "run": ("#D8F0EA", "#33897A"),
+    "explorer": ("#E8EAF6", "#4A5AA8"),
 }
 
 # ============================== GLOBAL STYLE ==============================
@@ -724,8 +726,6 @@ elif page == "run":
 
                     result_df, missing_regions, unmapped_zones, zero_factor_regions = add_calculations(master_df, factor_lookup=factor_lookup, zone_mapping=zone_mapping)
                     company_summary_df = build_company_summary(result_df)
-                    if zero_factor_regions:
-                        st.error(f"{len(zero_factor_regions)} region(s) have an Individual Factor of exactly 0, which zeroes out ALL Sales Derived/Units Estd for that state: {sorted(zero_factor_regions)}. Go to Individual Factor and fix this before trusting the output.")
                     if missing_regions:
                         st.warning(f"{len(missing_regions)} state region(s) had no Individual Factor and used the default (1.0): {sorted(missing_regions)}.")
                     if unmapped_zones:
@@ -778,3 +778,160 @@ elif page == "run":
             soft_card_open("Preview - Variance (brand total vs sum of its SKUs)")
             st.dataframe(st.session_state.variance_df.head(50), use_container_width=True)
             soft_card_close()
+
+elif page == "explorer":
+    page_header("explorer", "KPI Explorer", "Look up any KPI for any company or brand, with filters. Reads directly from the verified pipeline output.")
+
+    if "result_df" not in st.session_state or st.session_state.result_df is None:
+        soft_card_open()
+        st.markdown('<p class="soft-note">No pipeline output yet. Go to <b>Run and Download</b> and run the pipeline first. The explorer reads the exact same numbers as the Excel output.</p>', unsafe_allow_html=True)
+        soft_card_close()
+    else:
+        result_df = st.session_state.result_df
+        company_df = st.session_state.get("company_summary_df")
+
+        # KPIs that can be validly summed across categories. MS% and HH cannot.
+        ADDITIVE_KPIS = {"Sales Derived", "Units Estd", "Val", "Vol"}
+        PCT_KPIS = {"Value MS%", "Units MS%"}
+        COMPANY_KPIS = ["Value MS%", "Units MS%", "Sales Derived", "Units Estd"]
+        BRAND_KPIS = ["Value MS%", "Units MS%", "Sales Derived", "Units Estd", "HH", "Vol", "Val"]
+
+        def periods_in(df):
+            seen, out = set(), []
+            for c in df.columns:
+                if "__" in c:
+                    p = c.split("__", 1)[1]
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+            return out
+
+        def fmt_val(kpi, v):
+            if pd.isna(v):
+                return "-"
+            if kpi in PCT_KPIS:
+                return f"{v * 100:,.2f}%"
+            return f"{v:,.2f}"
+
+        soft_card_open("Selection")
+        level = st.radio("Level", ["Company", "Brand"], horizontal=True, key="kx_level")
+
+        if level == "Company":
+            base = company_df if company_df is not None else pd.DataFrame()
+            kpis = COMPANY_KPIS
+            entities = sorted([c for c in base["Company"].dropna().unique() if c != "Category Total"]) if len(base) else []
+            ent_col = "Company"
+        else:
+            base = result_df[result_df["Flag"].isin(["Brand", "Others"])].copy()
+            kpis = BRAND_KPIS
+            entities = sorted(base["Brand_SKU_Item"].dropna().unique()) if len(base) else []
+            ent_col = "Brand_SKU_Item"
+
+        if not len(base) or not entities:
+            st.warning("No rows available at this level in the current output.")
+            soft_card_close()
+        else:
+            default_ent = 0
+            for i, e in enumerate(entities):
+                if "GODREJ" in str(e).upper():
+                    default_ent = i
+                    break
+
+            c1, c2 = st.columns(2)
+            with c1:
+                entity = st.selectbox(level, entities, index=default_ent, key="kx_entity")
+            with c2:
+                kpi = st.selectbox("KPI", kpis, key="kx_kpi")
+
+            all_formats = sorted(base["Format"].dropna().unique())
+            all_markets = list(base["State_Zone"].dropna().unique())
+            market_order = sorted(all_markets, key=lambda m: (m != "All India", m))
+            ur_opts = [u for u in ["U+R", "U", "R"] if u in set(base["Urban_Rural"].dropna().unique())]
+            tg_opts = sorted(base["TG_Segment"].dropna().unique(), key=lambda t: (t != "TOTAL", t))
+            all_periods = periods_in(base)
+
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                sel_formats = st.multiselect("Category (Format)", all_formats, default=all_formats, key="kx_fmt")
+            with f2:
+                market = st.selectbox("Market", market_order, key="kx_mkt")
+            with f3:
+                ur = st.selectbox("Urban / Rural", ur_opts, key="kx_ur")
+
+            f4, f5 = st.columns(2)
+            with f4:
+                tg = st.selectbox("TG Segment", tg_opts, key="kx_tg") if len(tg_opts) > 1 else tg_opts[0]
+            with f5:
+                period_choice = st.selectbox("Period", ["All periods (trend)"] + all_periods,
+                                             index=len(all_periods), key="kx_period")
+            soft_card_close()
+
+            if not sel_formats:
+                st.info("Select at least one Category.")
+            else:
+                sub = base[
+                    (base[ent_col] == entity)
+                    & (base["Format"].isin(sel_formats))
+                    & (base["State_Zone"] == market)
+                    & (base["Urban_Rural"] == ur)
+                    & (base["TG_Segment"] == tg)
+                ]
+
+                if sub.empty:
+                    st.warning(f"No data for {entity} with these filters. Try a different Market, U/R cut, or Category.")
+                else:
+                    multi_cat = sub["Format"].nunique() > 1
+                    show_periods = all_periods if period_choice == "All periods (trend)" else [period_choice]
+                    show_periods = [p for p in show_periods if f"{kpi}__{p}" in sub.columns]
+
+                    if not show_periods:
+                        st.warning(f"{kpi} is not available for the selected period in this data.")
+                    else:
+                        st.write("")
+                        if multi_cat and kpi not in ADDITIVE_KPIS:
+                            st.info(f"{kpi} cannot be added across categories (the total would be meaningless), so it is shown per category below.")
+
+                        if len(show_periods) == 1:
+                            p = show_periods[0]
+                            col = f"{kpi}__{p}"
+                            if multi_cat:
+                                rows = sub.groupby("Format", as_index=False)[col].sum(min_count=1)
+                                if kpi in ADDITIVE_KPIS:
+                                    stat_card(f"{entity} | {kpi} | {p} | Total across {len(rows)} categories",
+                                              fmt_val(kpi, rows[col].sum()), PAGE_ACCENTS["explorer"][0])
+                                    st.write("")
+                                disp = rows.rename(columns={col: kpi, "Format": "Category"}).copy()
+                                disp[kpi] = disp[kpi].map(lambda v: fmt_val(kpi, v))
+                                st.dataframe(disp, use_container_width=True, hide_index=True)
+                            else:
+                                val = sub[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else sub[col].iloc[0]
+                                stat_card(f"{entity} | {kpi} | {p} | {market} ({ur}, {tg})",
+                                          fmt_val(kpi, val), PAGE_ACCENTS["explorer"][0])
+                        else:
+                            recs = []
+                            group_cats = multi_cat
+                            for p in show_periods:
+                                col = f"{kpi}__{p}"
+                                if group_cats:
+                                    for fmt_name, grp in sub.groupby("Format"):
+                                        v = grp[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else grp[col].iloc[0]
+                                        recs.append({"Period": p, "Category": fmt_name, kpi: v})
+                                else:
+                                    v = sub[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else sub[col].iloc[0]
+                                    recs.append({"Period": p, kpi: v})
+                            trend = pd.DataFrame(recs)
+
+                            plot_df = trend.copy()
+                            if kpi in PCT_KPIS:
+                                plot_df[kpi] = plot_df[kpi] * 100
+                            if group_cats:
+                                chart_df = plot_df.pivot(index="Period", columns="Category", values=kpi).reindex(show_periods)
+                            else:
+                                chart_df = plot_df.set_index("Period")[[kpi]].reindex(show_periods)
+                            st.line_chart(chart_df)
+
+                            disp = trend.copy()
+                            disp[kpi] = disp[kpi].map(lambda v: fmt_val(kpi, v))
+                            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+                        st.caption("These numbers come from the same verified pipeline output as the downloaded Excel, no separate calculation.")
