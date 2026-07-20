@@ -440,6 +440,16 @@ def find_format_b_signature(rows, max_scan=6):
         if first == "universe" and len(row) > 1 and row[1] is not None:
             if "growth factor" in str(row[1]).strip().lower():
                 return True
+        # Variant 3: some files (e.g. Val Added Pwd) open with an
+        # 'Analysis' | 'Crosstab - PulsePlus-8.0' row instead of Process
+        # Period or Universe. Everything below that opener is the same
+        # Format B monthly block. Matched on the 'crosstab' + 'pulseplus'
+        # pair (Kantar's product name) so it stays specific - neither word
+        # appears at the top of Format A or Format C.
+        if first == "analysis" and len(row) > 1 and row[1] is not None:
+            partner = str(row[1]).strip().lower()
+            if "crosstab" in partner and "pulseplus" in partner.replace(" ", "").replace("-", ""):
+                return True
     return False
 
 
@@ -620,11 +630,21 @@ def process_workbook(file_path_or_bytes, format_tag, flag_overrides=None, compan
             id_cols = 5
             data_start_idx = period_header_row_idx + 1
         else:
+            seen = []
+            for _r in rows[:6]:
+                if not _r:
+                    continue
+                _a = str(_r[0]).strip() if _r[0] is not None else ""
+                _b = str(_r[1]).strip() if len(_r) > 1 and _r[1] is not None else ""
+                if _a or _b:
+                    seen.append(f"'{_a[:24]}' | '{_b[:24]}'")
+            seen_txt = " ;; ".join(seen[:4]) if seen else "(first 6 rows are all empty)"
             raise ValueError(
                 f"[{format_tag} / sheet '{sheet_name}'] Could not recognize this sheet's layout as "
                 f"any known format (Format A: standalone 'HH' header row with 5 id columns; Format B: "
-                f"'Process Period' marker; Format C: a 'Brand_SKU Item' column). Nothing was read from "
-                f"this sheet rather than risk reading the wrong cells."
+                f"a 'Process Period' row OR a 'Universe' + 'With Growth Factor' row; Format C: a "
+                f"'Brand_SKU Item' column). Nothing was read from this sheet rather than risk reading "
+                f"the wrong cells. First rows actually seen (col A | col B): {seen_txt}"
             )
 
         product_idx = id_cols - 1

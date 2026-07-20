@@ -468,11 +468,13 @@ elif page == "factor":
         (st.session_state.factor_df["Individual_Factor_R"] == 0)
     ]
     if len(zero_rows) > 0:
-        st.error(
-            f"{len(zero_rows)} state(s) have a factor of exactly 0, which will zero out ALL Sales Derived "
-            f"and Units Estd for that state/Urban_Rural, with no other warning sign: "
-            f"{zero_rows['State_Zone'].tolist()}. A real factor is never truly zero, fix this before running."
-        )
+        names = ", ".join(zero_rows["State_Zone"].tolist())
+        msg = f"{names} has an Individual Factor of 0. Please check and update if needed."
+        # Toast auto-dismisses on its own after a few seconds and never blocks
+        # the page. A quiet grey caption stays as a gentle reminder without the
+        # alarming red box. (Per request: simple wording, disappears on its own.)
+        st.toast(msg, icon="ℹ️")
+        st.caption(msg)
 
     st.write("")
     soft_card_open("Your Individual Factor list")
@@ -955,11 +957,32 @@ elif page == "explorer":
                         if multi_cat and kpi not in ADDITIVE_KPIS:
                             st.info(f"{kpi} cannot be added across categories (the total would be meaningless), so it is shown per category below.")
 
+                        # For a percentage KPI (MS%), rows must NEVER be summed
+                        # - percentages don't add. At company level the summary
+                        # already holds exactly one correct MS% per (Format,
+                        # market, U/R, TG) group, so we take that value. If a
+                        # filter ever leaves more than one row for a percentage,
+                        # we take the mean rather than the sum, and never exceed
+                        # a sensible value. Additive KPIs (sales, units) still sum.
+                        def agg_value(frame, column):
+                            s = frame[column]
+                            if kpi in ADDITIVE_KPIS:
+                                return s.sum(min_count=1)
+                            s = s.dropna()
+                            if len(s) == 0:
+                                return float("nan")
+                            return s.iloc[0] if len(s) == 1 else s.mean()
+
                         if len(show_periods) == 1:
                             p = show_periods[0]
                             col = f"{kpi}__{p}"
                             if multi_cat:
-                                rows = sub.groupby("Format", as_index=False)[col].sum(min_count=1)
+                                if kpi in ADDITIVE_KPIS:
+                                    rows = sub.groupby("Format", as_index=False)[col].sum(min_count=1)
+                                else:
+                                    rows = (sub.groupby("Format")
+                                            .apply(lambda g: agg_value(g, col))
+                                            .reset_index(name=col))
                                 if kpi in ADDITIVE_KPIS:
                                     stat_card(f"{entity} | {kpi} | {p} | Total across {len(rows)} categories",
                                               fmt_val(kpi, rows[col].sum()), PAGE_ACCENTS["explorer"][0])
@@ -968,7 +991,7 @@ elif page == "explorer":
                                 disp[kpi] = disp[kpi].map(lambda v: fmt_val(kpi, v))
                                 st.dataframe(disp, use_container_width=True, hide_index=True)
                             else:
-                                val = sub[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else sub[col].iloc[0]
+                                val = agg_value(sub, col)
                                 stat_card(f"{entity} | {kpi} | {p} | {market} ({ur}, {tg})",
                                           fmt_val(kpi, val), PAGE_ACCENTS["explorer"][0])
                         else:
@@ -978,11 +1001,9 @@ elif page == "explorer":
                                 col = f"{kpi}__{p}"
                                 if group_cats:
                                     for fmt_name, grp in sub.groupby("Format"):
-                                        v = grp[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else grp[col].iloc[0]
-                                        recs.append({"Period": p, "Category": fmt_name, kpi: v})
+                                        recs.append({"Period": p, "Category": fmt_name, kpi: agg_value(grp, col)})
                                 else:
-                                    v = sub[col].sum(min_count=1) if kpi in ADDITIVE_KPIS else sub[col].iloc[0]
-                                    recs.append({"Period": p, kpi: v})
+                                    recs.append({"Period": p, kpi: agg_value(sub, col)})
                             trend = pd.DataFrame(recs)
 
                             plot_df = trend.copy()

@@ -1048,6 +1048,145 @@ try:
 except ImportError:
     print("  SKIP (streamlit AppTest not available in this environment)")
 
+
+
+print("=" * 70)
+print("TEST GROUP 31: Unrecognized-sheet error is self-diagnosing")
+print("=" * 70)
+import openpyxl as _op31, io as _io31
+
+_wb31 = _op31.Workbook()
+_ws31 = _wb31.active
+_ws31.title = "Delhi (U)"
+_ws31["A1"] = "Something Odd"; _ws31["B1"] = "Unexpected Header"
+_ws31["A2"] = "Measure"; _ws31["B2"] = "Households in 000s"
+_ws31["A6"] = "Delhi (U)"
+for _r31 in range(7, 14):
+    _ws31.cell(row=_r31, column=1, value="x")
+_buf31 = _io31.BytesIO(); _wb31.save(_buf31); _buf31.seek(0)
+
+_msg31 = ""
+try:
+    process_workbook(_buf31, "Henna")
+    check("Unrecognized sheet raises rather than guessing", False, "no error raised")
+except ValueError as _e31:
+    _msg31 = str(_e31)
+    check("Unrecognized sheet raises rather than guessing", True)
+
+check("Error names the file and sheet", "Henna" in _msg31 and "Delhi (U)" in _msg31)
+check("Error mentions BOTH Format B signature variants (proves new build is running)",
+      "Process Period" in _msg31 and "Growth Factor" in _msg31)
+check("Error reports what it actually saw in the sheet",
+      "First rows actually seen" in _msg31 and "Something Odd" in _msg31)
+
+
+
+print("=" * 70)
+print("TEST GROUP 32: Format B - 'Analysis / Crosstab PulsePlus' opener (Val Added Pwd)")
+print("=" * 70)
+from cleaner import find_format_b_signature as _fbs32
+import openpyxl as _op32, io as _io32
+
+check("Analysis + Crosstab-PulsePlus opener detected",
+      _fbs32([("Analysis", "Crosstab - PulsePlus-8.0"), ("Measure", "Households in 000s")]) is True)
+check("'Analysis' alone is NOT enough (no false positive)",
+      _fbs32([("Analysis", "Something else")]) is False)
+check("'Analysis' with only Crosstab but no PulsePlus is NOT enough",
+      _fbs32([("Analysis", "Crosstab - other")]) is False)
+check("All three Format B openers now accepted",
+      _fbs32([("Process Period", "x")]) and
+      _fbs32([("Universe", "With Growth Factor")]) and
+      _fbs32([("Analysis", "Crosstab - PulsePlus-8.0")]))
+
+# Real Format A / C files must still detect as themselves
+_wbA32 = _op32.load_workbook(RAW, data_only=True, read_only=True)
+check("Format A still detected as A (Analysis opener didn't loosen detection)",
+      detect_sheet_raw_format(list(_wbA32["Rajasthan (U+R)"].iter_rows(values_only=True))) == "A")
+if os.path.exists(FORMAT_C_FILE):
+    _wbC32 = _op32.load_workbook(FORMAT_C_FILE, data_only=True, read_only=True)
+    check("Format C still detected as C",
+          detect_sheet_raw_format(list(_wbC32["Maharashtra(U+R) - SHC"].iter_rows(values_only=True))) == "C")
+
+# End-to-end: Val-Added-style opener parses identical to the Creme baseline
+if os.path.exists(FORMAT_B_FILE):
+    _base32, _ = process_workbook(FORMAT_B_FILE, "Creme")
+    _wb32 = _op32.load_workbook(FORMAT_B_FILE)
+    _ws32 = _wb32[_wb32.sheetnames[0]]
+    _ws32.delete_rows(1)
+    _ws32["A1"] = "Analysis"; _ws32["B1"] = "Crosstab - PulsePlus-8.0"
+    _ws32["A2"] = "Measure";  _ws32["B2"] = "Households in 000s ; Vol"
+    _ws32["A3"] = None;       _ws32["B3"] = "Average Consumption in S"
+    _buf32 = _io32.BytesIO(); _wb32.save(_buf32); _buf32.seek(0)
+    _val32, _ = process_workbook(_buf32, "Val Added Pwd")
+    _cols32 = [c for c in _base32.columns if c != "Format"]
+    check("Val-Added-style opener parses byte-identical to Creme baseline",
+          _base32[_cols32].reset_index(drop=True).equals(_val32[_cols32].reset_index(drop=True)))
+
+
+
+print("=" * 70)
+print("TEST GROUP 33: KPI Explorer never sums percentages (>100% bug)")
+print("=" * 70)
+try:
+    from streamlit.testing.v1 import AppTest as _AT33
+    import warnings as _w33; _w33.filterwarnings("ignore")
+
+    _frames33 = []
+    _groups33 = {
+        "SHC": {"Maharashtra(U+R) - SHC", "Maharasthra(R) - SHC", "Maharasthra(U) - SHC"},
+        "KM":  {"Maharasthra(U+R) - Pwd KM", "Maharasthra(R) - Pwd KM", "Maharasthra(U) - Pwd KM"},
+    }
+    for _fmt33, _sh33 in _groups33.items():
+        _d33, _ = process_workbook(FORMAT_C_FILE, _fmt33, included_sheet_names=_sh33)
+        _d33["State_Zone"] = "Maharashtra"
+        _frames33.append(_d33)
+    _m33 = pd.concat(_frames33, ignore_index=True)
+    _r33, _, _, _ = add_calculations(_m33, factor_lookup=build_factor_lookup({"Maharashtra": {"U": 1.85, "R": 1.85}}), zone_mapping={})
+    _cs33 = build_company_summary(_r33)
+
+    _at33 = _AT33.from_file("app.py", default_timeout=120)
+    _at33.session_state["result_df"] = _r33
+    _at33.session_state["company_summary_df"] = _cs33
+    _at33.session_state["current_page"] = "explorer"
+    _at33.run()
+    _at33.selectbox[0].select("GODREJ CONSUMER PRODS")
+    _at33.selectbox[1].select("Value MS%")
+    _at33.selectbox[2].select("Maharashtra")
+    _at33.selectbox[3].select("U+R")
+    _at33.selectbox[-1].select(_at33.selectbox[-1].options[0])  # trend
+    _at33.run()
+    check("Explorer MS% trend runs clean", len(_at33.exception) == 0)
+
+    def _pct33(s):
+        try:
+            return float(str(s).replace("%", "").replace(",", ""))
+        except (ValueError, TypeError):
+            return None
+
+    _shown33 = _at33.dataframe[0].value
+    _vals33 = [_pct33(v) for v in _shown33["Value MS%"] if _pct33(v) is not None]
+    check("No Value MS% exceeds 100% (percentages are not summed)",
+          all(v <= 100.01 for v in _vals33), f"max was {max(_vals33) if _vals33 else 'n/a'}")
+
+    # Each shown MS% must equal the company summary exactly
+    _per33 = [c for c in _cs33.columns if c.startswith("Value MS%__")][0].split("__")[1]
+    _g33 = _cs33[(_cs33.Company == "GODREJ CONSUMER PRODS") & (_cs33.State_Zone == "Maharashtra")
+                 & (_cs33.Urban_Rural == "U+R") & (_cs33.TG_Segment == "TOTAL")]
+    _exp33 = {row.Format: row["Value MS%__" + _per33] * 100 for _, row in _g33.iterrows()}
+    _mism33 = 0
+    for _, _row33 in _shown33[_shown33["Period"] == _per33].iterrows():
+        _e33 = _exp33.get(_row33["Category"])
+        _s33 = _pct33(_row33["Value MS%"])
+        if _e33 is not None and _s33 is not None and abs(_e33 - _s33) > 0.01:
+            _mism33 += 1
+    check("Every explorer MS% matches the company summary exactly", _mism33 == 0)
+
+    # 'Category Total' must never appear as a selectable company
+    check("Category Total excluded from company entities",
+          "Category Total" not in set(_cs33.Company))
+except ImportError:
+    print("  SKIP (streamlit AppTest not available)")
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)
