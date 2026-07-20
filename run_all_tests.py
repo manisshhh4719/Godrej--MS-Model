@@ -1187,6 +1187,64 @@ try:
 except ImportError:
     print("  SKIP (streamlit AppTest not available)")
 
+
+
+print("=" * 70)
+print("TEST GROUP 34: Combined market share across categories (no false 100%)")
+print("=" * 70)
+try:
+    from streamlit.testing.v1 import AppTest as _AT34
+    import warnings as _w34; _w34.filterwarnings("ignore")
+
+    _frames34 = []
+    for _fmt34, _sh34 in {
+        "SHC": {"Maharashtra(U+R) - SHC", "Maharasthra(R) - SHC", "Maharasthra(U) - SHC"},
+        "KM":  {"Maharasthra(U+R) - Pwd KM", "Maharasthra(R) - Pwd KM", "Maharasthra(U) - Pwd KM"},
+    }.items():
+        _d34, _ = process_workbook(FORMAT_C_FILE, _fmt34, included_sheet_names=_sh34)
+        _d34["State_Zone"] = "Maharashtra"
+        _frames34.append(_d34)
+    _m34 = pd.concat(_frames34, ignore_index=True)
+    _r34, _, _, _ = add_calculations(_m34, factor_lookup=build_factor_lookup({"Maharashtra": {"U": 1.85, "R": 1.85}}), zone_mapping={})
+    _cs34 = build_company_summary(_r34)
+    _per34 = [c for c in _r34.columns if c.startswith("Sales Derived__")][0].split("__")[1]
+
+    # Manual combined share
+    _cat34 = _r34[(_r34.Flag == "Category") & (_r34.State_Zone == "Maharashtra") & (_r34.Urban_Rural == "U+R") & (_r34.TG_Segment == "TOTAL")]
+    _denom34 = _cat34.groupby("Format")["Sales Derived__" + _per34].first().sum()
+    _num34 = _cs34[(_cs34.Company == "GODREJ CONSUMER PRODS") & (_cs34.State_Zone == "Maharashtra") & (_cs34.Urban_Rural == "U+R") & (_cs34.TG_Segment == "TOTAL")]["Sales Derived__" + _per34].sum()
+    _expected34 = _num34 / _denom34 * 100
+
+    _at34 = _AT34.from_file("app.py", default_timeout=120)
+    _at34.session_state["result_df"] = _r34
+    _at34.session_state["company_summary_df"] = _cs34
+    _at34.session_state["current_page"] = "explorer"
+    _at34.run()
+    _at34.selectbox[0].select("GODREJ CONSUMER PRODS")
+    _at34.selectbox[1].select("Value MS%")
+    _at34.selectbox[2].select("Maharashtra")
+    _at34.selectbox[3].select("U+R")
+    _at34.selectbox[-1].select(_per34)
+    _at34.run()
+    check("Combined-share view runs clean", len(_at34.exception) == 0)
+
+    _cards34 = [str(md.value) for md in _at34.markdown if "stat-card" in str(md.value)]
+    _shown34 = _cards34[-1].split('stat-value">')[1].split("<")[0] if _cards34 else ""
+    _shownf34 = float(_shown34.replace("%", "")) if _shown34 else -1
+    check("Combined share matches manual sales-weighted calc",
+          abs(_shownf34 - _expected34) < 0.05, f"shown={_shown34} expected={_expected34:.2f}%")
+    check("Combined share is a valid 0-100% (never a false 100 or over)", 0 <= _shownf34 <= 100)
+    check("'meaningless' message removed", not any("meaningless" in i.value for i in _at34.info))
+
+    # 'ANY '-prefixed category rows must never be selectable as a brand
+    _at34.radio[0].set_value("Brand")
+    _at34.run()
+    _brand_opts34 = _at34.selectbox[0].options
+    check("No 'ANY '-prefixed pseudo-brand in the brand picker",
+          not any(str(b).strip().upper().startswith("ANY ") for b in _brand_opts34))
+except ImportError:
+    print("  SKIP (streamlit AppTest not available)")
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)

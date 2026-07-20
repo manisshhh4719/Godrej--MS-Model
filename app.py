@@ -889,6 +889,10 @@ elif page == "explorer":
             ent_col = "Company"
         else:
             base = result_df[result_df["Flag"].isin(["Brand", "Others"])].copy()
+            # Defensive: a category-total row (e.g. 'ANY SHC') that slipped
+            # through classification would show a false 100% share of itself.
+            # Real brands never start with 'ANY '. Drop those from the picker.
+            base = base[~base["Brand_SKU_Item"].astype(str).str.strip().str.upper().str.startswith("ANY ")]
             kpis = BRAND_KPIS
             entities = sorted(base["Brand_SKU_Item"].dropna().unique()) if len(base) else []
             ent_col = "Brand_SKU_Item"
@@ -954,16 +958,11 @@ elif page == "explorer":
                         st.warning(f"{kpi} is not available for the selected period in this data.")
                     else:
                         st.write("")
-                        if multi_cat and kpi not in ADDITIVE_KPIS:
-                            st.info(f"{kpi} cannot be added across categories (the total would be meaningless), so it is shown per category below.")
 
                         # For a percentage KPI (MS%), rows must NEVER be summed
-                        # - percentages don't add. At company level the summary
-                        # already holds exactly one correct MS% per (Format,
-                        # market, U/R, TG) group, so we take that value. If a
-                        # filter ever leaves more than one row for a percentage,
-                        # we take the mean rather than the sum, and never exceed
-                        # a sensible value. Additive KPIs (sales, units) still sum.
+                        # - percentages don't add. If a filter leaves more than
+                        # one row for a percentage we take the mean; additive
+                        # KPIs (sales, units) still sum.
                         def agg_value(frame, column):
                             s = frame[column]
                             if kpi in ADDITIVE_KPIS:
@@ -973,20 +972,62 @@ elif page == "explorer":
                                 return float("nan")
                             return s.iloc[0] if len(s) == 1 else s.mean()
 
+                        def combined_share(period):
+                            """True overall market share across the selected
+                            categories for a percentage KPI: entity's total
+                            Sales/Units Derived divided by the WHOLE market's
+                            total for the same categories/market/UR/TG/period.
+                            This is a sales-weighted combination, NOT a sum of
+                            percentages, so it is always a valid 0-100% figure.
+                            Returns None if the underlying value column is
+                            missing (e.g. brand-level HH-only KPIs)."""
+                            base_col = "Sales Derived" if kpi == "Value MS%" else "Units Estd"
+                            vcol = f"{base_col}__{period}"
+                            if vcol not in result_df.columns:
+                                return None
+                            scope = result_df[
+                                (result_df["Format"].isin(sel_formats))
+                                & (result_df["State_Zone"] == market)
+                                & (result_df["Urban_Rural"] == ur)
+                                & (result_df["TG_Segment"] == tg)
+                            ]
+                            # Denominator: each category's own Category-Total row,
+                            # summed across the selected categories (this is the
+                            # true market size, already in the data).
+                            denom_rows = scope[scope["Flag"] == "Category"]
+                            denom = denom_rows.groupby("Format")[vcol].first().sum()
+                            # Numerator: the entity's own value in each category.
+                            num_rows = scope[scope[ent_col] == entity]
+                            num = num_rows[vcol].sum(min_count=1)
+                            if denom in (0, None) or pd.isna(denom):
+                                return None
+                            return num / denom
+
+                        is_pct_multi = multi_cat and kpi in PCT_KPIS
+
                         if len(show_periods) == 1:
                             p = show_periods[0]
                             col = f"{kpi}__{p}"
                             if multi_cat:
                                 if kpi in ADDITIVE_KPIS:
                                     rows = sub.groupby("Format", as_index=False)[col].sum(min_count=1)
+                                    stat_card(f"{entity} | {kpi} | {p} | Total across {len(rows)} categories",
+                                              fmt_val(kpi, rows[col].sum()), PAGE_ACCENTS["explorer"][0])
+                                    st.write("")
+                                elif is_pct_multi:
+                                    cs_val = combined_share(p)
+                                    if cs_val is not None:
+                                        stat_card(f"{entity} | Combined {kpi} across {sub['Format'].nunique()} categories | {p}",
+                                                  fmt_val(kpi, cs_val), PAGE_ACCENTS["explorer"][0])
+                                        st.caption("Combined share is weighted by sales across the selected categories, not an average of the per-category percentages. Breakdown below.")
+                                        st.write("")
+                                    rows = (sub.groupby("Format")
+                                            .apply(lambda g: agg_value(g, col))
+                                            .reset_index(name=col))
                                 else:
                                     rows = (sub.groupby("Format")
                                             .apply(lambda g: agg_value(g, col))
                                             .reset_index(name=col))
-                                if kpi in ADDITIVE_KPIS:
-                                    stat_card(f"{entity} | {kpi} | {p} | Total across {len(rows)} categories",
-                                              fmt_val(kpi, rows[col].sum()), PAGE_ACCENTS["explorer"][0])
-                                    st.write("")
                                 disp = rows.rename(columns={col: kpi, "Format": "Category"}).copy()
                                 disp[kpi] = disp[kpi].map(lambda v: fmt_val(kpi, v))
                                 st.dataframe(disp, use_container_width=True, hide_index=True)
