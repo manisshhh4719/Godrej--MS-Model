@@ -494,7 +494,12 @@ def build_company_summary(result_df):
     group_cols = ["Format", "State_Zone", "Urban_Rural", "TG_Segment"]
 
     cat_mask = result_df["Flag"] == "Category"
-    company_mask = ~cat_mask
+    # 'Subtotal' rows are redundant company/brand subtotals baked into some
+    # source files (e.g. 'ANY GCPL SHC (GEE+SELFIE)'). They are NEITHER the
+    # category denominator NOR a summable company row - counting them double-
+    # counts the brands they aggregate. Exclude them from both sides.
+    subtotal_mask = result_df["Flag"] == "Subtotal"
+    company_mask = ~cat_mask & ~subtotal_mask
 
     sum_cols = [f"Units Estd__{p}" for p in periods] + [f"Sales Derived__{p}" for p in periods]
     sum_cols = [c for c in sum_cols if c in result_df.columns]

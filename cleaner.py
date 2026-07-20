@@ -402,9 +402,27 @@ def classify_flag_format_b(product_name):
     raw = str(product_name)
     if raw.startswith(" ") and raw.endswith(" "):
         trimmed = raw.strip()
-        if trimmed.upper().startswith("ANY "):
+        upper = trimmed.upper()
+        if upper.startswith("ANY "):
+            # Most 'ANY ...' rows are the genuine category total (e.g.
+            # 'ANY HAIR COL.SHAMPOO'). BUT some files also contain an
+            # 'ANY <company> ...' subtotal - e.g. 'ANY GCPL SHC (GEE+SELFIE)'
+            # is Godrej's own Expert+Selfie subtotal, NOT the market total.
+            # If such a subtotal is treated as the Category denominator, the
+            # company's MS% collapses to its own value / its own value = 100%
+            # (this is exactly the SHC 100% bug). So an 'ANY' row that names a
+            # specific manufacturer/brand is classified as a Brand subtotal,
+            # never as the category. The true category total names the product,
+            # not a company.
+            COMPANY_TOKENS_IN_ANY = (
+                "GCPL", "GODREJ", "HUL", "LOREAL", "L'OREAL", "CAVINKARE",
+                "HENKEL", "MARICO", "PATANJALI", "HONASA", "GEE", "SELFIE",
+                "EXPERT", "HYGIENIC", "VCARE", "SISO", "NEHA",
+            )
+            if any(tok in upper for tok in COMPANY_TOKENS_IN_ANY):
+                return "Subtotal"
             return "Category"
-        if "OTH." in trimmed.upper() or "OTHERS" in trimmed.upper():
+        if "OTH." in upper or "OTHERS" in upper:
             return "Others"
         return "Brand"
     return "SKU"

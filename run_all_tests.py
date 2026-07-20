@@ -1245,6 +1245,51 @@ try:
 except ImportError:
     print("  SKIP (streamlit AppTest not available)")
 
+
+
+print("=" * 70)
+print("TEST GROUP 35: Company-subtotal 'ANY' rows dont cause false 100% (SHC bug)")
+print("=" * 70)
+from cleaner import classify_flag_format_b as _cf35
+
+check("True category 'ANY HAIR COL.SHAMPOO' stays Category",
+      _cf35(" ANY HAIR COL.SHAMPOO ") == "Category")
+check("Company subtotal 'ANY GCPL SHC' flagged Subtotal, not Category",
+      _cf35(" ANY GCPL SHC (GEE+SELFIE) ") == "Subtotal")
+check("'ANY CREME' (product, no company) stays Category",
+      _cf35(" ANY CREME ") == "Category")
+check("'ANY GODREJ ...' flagged Subtotal", _cf35(" ANY GODREJ EXPERT ") == "Subtotal")
+
+_SHC35 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC35):
+    _m35, _ = process_all_files({"SHC": _SHC35}, verbose=False)
+    _r35, _, _, _ = add_calculations(_m35)
+    _cs35 = build_company_summary(_r35)
+    _per35 = "2026 May"
+
+    _cats35 = set(_r35[_r35.Flag == "Category"]["Brand_SKU_Item"].unique())
+    check("Only the true category is the denominator (subtotal excluded)",
+          _cats35 == {"ANY HAIR COL.SHAMPOO"}, f"category rows: {_cats35}")
+
+    _g35 = _cs35[(_cs35.Company.str.contains("GODREJ", case=False, na=False))
+                 & (_cs35.State_Zone == "All India") & (_cs35.Urban_Rural == "U+R")
+                 & (_cs35.TG_Segment == "TOTAL")]
+    _gv35 = _g35["Value MS%__" + _per35].iloc[0] * 100
+    check("Godrej SHC share is realistic, not a false 100%",
+          5 < _gv35 < 30, f"Godrej SHC = {_gv35:.2f}%")
+
+    _all35 = _cs35[(_cs35.State_Zone == "All India") & (_cs35.Urban_Rural == "U+R") & (_cs35.TG_Segment == "TOTAL")]
+    _sumshare35 = _all35["Value MS%__" + _per35].sum() * 100
+    check("All company shares sum to ~100% (no double-count from subtotal)",
+          abs(_sumshare35 - 100) < 0.5, f"sum = {_sumshare35:.2f}%")
+
+# Format B Creme 'ANY CREME' must still work as the category (no regression)
+if os.path.exists(FORMAT_B_FILE):
+    _mb35, _ = process_all_files({"Creme": FORMAT_B_FILE}, verbose=False)
+    _rb35, _, _, _ = add_calculations(_mb35)
+    check("Format B 'ANY CREME' still classified as Category (no regression)",
+          "ANY CREME" in set(_rb35[_rb35.Flag == "Category"]["Brand_SKU_Item"].unique()))
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)
