@@ -1290,6 +1290,44 @@ if os.path.exists(FORMAT_B_FILE):
     check("Format B 'ANY CREME' still classified as Category (no regression)",
           "ANY CREME" in set(_rb35[_rb35.Flag == "Category"]["Brand_SKU_Item"].unique()))
 
+
+
+print("=" * 70)
+print("TEST GROUP 36: Urban-only states get U+R = U (Delhi/Guwahati fix)")
+print("=" * 70)
+_SHC36 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC36):
+    _m36, _ = process_all_files({"SHC": _SHC36}, verbose=False)
+    _r36, _, _, _ = add_calculations(_m36)
+    _per36 = "2026 May"
+    _sd36 = "Sales Derived__" + _per36
+
+    # Delhi and Guwahati (Urban-only) now have a U+R row equal to their U
+    for _st36 in ["Delhi", "Guwahati"]:
+        _u = _r36[(_r36.State_Zone == _st36) & (_r36.Urban_Rural == "U") & (_r36.Flag == "Category")][_sd36].sum()
+        _urrows = _r36[(_r36.State_Zone == _st36) & (_r36.Urban_Rural == "U+R") & (_r36.Flag == "Category")]
+        check(f"{_st36}: U+R row now exists", len(_urrows) > 0)
+        check(f"{_st36}: U+R equals U (urban is the total)",
+              len(_urrows) > 0 and abs(_urrows[_sd36].sum() - _u) < 1)
+
+    # THE key fix: All India U+R now equals All India U + All India R exactly
+    _aiu = _r36[(_r36.State_Zone == "All India") & (_r36.Urban_Rural == "U") & (_r36.Flag == "Category")][_sd36].sum()
+    _air = _r36[(_r36.State_Zone == "All India") & (_r36.Urban_Rural == "R") & (_r36.Flag == "Category")][_sd36].sum()
+    _aiur = _r36[(_r36.State_Zone == "All India") & (_r36.Urban_Rural == "U+R") & (_r36.Flag == "Category")][_sd36].sum()
+    check("All India U+R == All India U + All India R (Sagar's tally issue fixed)",
+          abs(_aiur - (_aiu + _air)) < 1, f"U+R={_aiur:,.0f} vs U+R={_aiu + _air:,.0f}")
+
+    # States with BOTH U and R are untouched (U+R still = U + R, not doubled)
+    for _st36b in ["Rajasthan", "Maharashtra", "West Bengal"]:
+        _u2 = _r36[(_r36.State_Zone == _st36b) & (_r36.Urban_Rural == "U") & (_r36.Flag == "Category")][_sd36].sum()
+        _r2 = _r36[(_r36.State_Zone == _st36b) & (_r36.Urban_Rural == "R") & (_r36.Flag == "Category")][_sd36].sum()
+        _ur2 = _r36[(_r36.State_Zone == _st36b) & (_r36.Urban_Rural == "U+R") & (_r36.Flag == "Category")][_sd36].sum()
+        check(f"{_st36b} (has U and R) U+R unchanged = U + R", abs(_ur2 - (_u2 + _r2)) < 1)
+
+    # No duplicate U+R rows created anywhere
+    _dup36 = _r36[(_r36.Urban_Rural == "U+R") & (_r36.Flag == "Category")].groupby("State_Zone").size()
+    check("No state has a duplicate U+R category row", (_dup36 > 1).sum() == 0)
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)

@@ -362,6 +362,26 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
         _compute_units_sales(fallback, factor_lookup, default_factor, missing_factor_regions, zero_factor_regions)
         ur_raw_df.loc[missing_ur_mask, metric_cols] = fallback[metric_cols].values
 
+    # Urban-only states: some states report only an Urban sheet, with no Rural
+    # and no U+R sheet at all (e.g. Delhi, Guwahati in the Hair Colour files).
+    # For these the market's total IS its urban figure, so U+R = U. Without
+    # this they are dropped from every U+R rollup (All India U+R, zone U+R),
+    # understating the national total - exactly the "U+R not adding in Delhi
+    # and Guwahati" issue Sagar raised. We synthesize a full U+R row (copy of
+    # the U row, relabelled) ONLY for states that have NO Rural row anywhere,
+    # so a state with both U and R is never touched and this can't double count.
+    states_with_r = set(r_df["State_Zone"].unique())
+    states_with_raw_ur = set(ur_raw_df["State_Zone"].unique())
+    u_only = u_df[
+        (~u_df["State_Zone"].isin(states_with_r))
+        & (~u_df["State_Zone"].isin(states_with_raw_ur))
+    ]
+    synthesized_u_only_states = sorted(u_only["State_Zone"].unique())
+    if len(u_only) > 0:
+        u_only_ur = u_only.copy()
+        u_only_ur["Urban_Rural"] = "U+R"
+        ur_raw_df = pd.concat([ur_raw_df, u_only_ur], ignore_index=True)
+
     state_result = pd.concat([non_ur_df, ur_raw_df], ignore_index=True)
 
     # ---- Tier 3: zones, synthesized purely from zone_mapping + state_result ----
