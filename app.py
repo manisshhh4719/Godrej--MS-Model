@@ -4,7 +4,7 @@ import pandas as pd
 from cleaner import process_all_files, get_sheet_overview
 from calculator import (
     add_calculations, build_factor_lookup, DEFAULT_INDIVIDUAL_FACTOR_UR,
-    KNOWN_INTENTIONAL_ZERO_FACTORS, build_rollup_coverage,
+    KNOWN_INTENTIONAL_ZERO_FACTORS, build_rollup_coverage, build_tally_check,
     build_company_summary, DEFAULT_ZONE_MAPPING, STATE_TO_ZONE, compute_variance,
     smart_guess_companies, find_potential_duplicates,
 )
@@ -782,6 +782,16 @@ elif page == "run":
                     if unmapped_zones:
                         st.warning(f"{len(unmapped_zones)} Zone(s) have no member states present in the data and were NOT calculated: {sorted(unmapped_zones)}.")
 
+                    # Automatic tally QC: U+R must equal U + R everywhere, every
+                    # run. If this ever fails, say so loudly - never ship a
+                    # non-tallying number silently.
+                    tally_df = build_tally_check(result_df)
+                    if len(tally_df):
+                        st.error(f"TALLY CHECK FAILED: {len(tally_df)} datapoint(s) where U+R does not equal U + R. The first few are shown below. Do NOT use this output until resolved.")
+                        st.dataframe(tally_df.head(10), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("Tally check passed: U+R equals U + R for every state, brand, and period (Units Estd and Sales Derived).")
+
                     # Rollup coverage: warn loudly when a rollup is built from
                     # fewer states than exist in the data (e.g. only one state
                     # had a U+R sheet, so "All India (U+R)" is really just that
@@ -789,9 +799,9 @@ elif page == "run":
                     coverage_df = build_rollup_coverage(result_df, zone_mapping=zone_mapping)
                     gaps = coverage_df[coverage_df["States_Included"] < coverage_df["States_Expected"]]
                     if len(gaps):
-                        st.warning(f"{len(gaps)} rollup cut(s) are built from FEWER states than exist in your data. Their numbers are partial, not complete rollups. Details below.")
+                        st.warning(f"{len(gaps)} rollup cut(s) are built from fewer states than exist in your data. In every case below, the reason is stated: what the raw file contains for that state, and what the model did about it.")
                         for _, g in gaps.head(8).iterrows():
-                            st.warning(f"{g['Rollup']} ({g['Urban_Rural']}) in {g['Format']}: built from {g['States_Included']} of {g['States_Expected']} states. Missing: {g['Missing_States']}.")
+                            st.warning(f"{g['Rollup']} ({g['Urban_Rural']}) in {g['Format']}: built from {g['States_Included']} of {g['States_Expected']} states. {g['Missing_Detail']}.")
                         if len(gaps) > 8:
                             st.warning(f"...and {len(gaps) - 8} more partial rollup cut(s), see the full table below.")
                     with st.expander("Rollup coverage (which states fed All India and each Zone)"):

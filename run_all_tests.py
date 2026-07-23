@@ -1328,6 +1328,358 @@ if os.path.exists(_SHC36):
     _dup36 = _r36[(_r36.Urban_Rural == "U+R") & (_r36.Flag == "Category")].groupby("State_Zone").size()
     check("No state has a duplicate U+R category row", (_dup36 > 1).sum() == 0)
 
+
+
+print("=" * 70)
+print("TEST GROUP 37: U+R tally guaranteed by construction (Gujarat 874520 bug)")
+print("=" * 70)
+from calculator import build_tally_check
+
+_SHC37 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC37):
+    _m37, _ = process_all_files({"SHC": _SHC37}, verbose=False)
+    _r37, _, _, _ = add_calculations(_m37)
+    _g37 = _r37[(_r37.State_Zone == "Gujarat") & (_r37.Flag == "Category") & (_r37.TG_Segment == "TOTAL")]
+    _c37 = "Units Estd__2025 Dec"
+    _u37 = _g37[_g37.Urban_Rural == "U"][_c37].iloc[0]
+    _rr37 = _g37[_g37.Urban_Rural == "R"][_c37].iloc[0]
+    _ur37 = _g37[_g37.Urban_Rural == "U+R"][_c37].iloc[0]
+    check("Gujarat Units Estd Dec: U+R equals U + R exactly (the reported bug)",
+          abs(_ur37 - (_u37 + _rr37)) < 0.01, f"U+R={_ur37:,.1f} vs U+R={_u37 + _rr37:,.1f}")
+    check("The old averaged-factor fallback value (874,520) is gone",
+          abs(_ur37 - 874520.08) > 100, f"U+R={_ur37:,.1f}")
+
+    # The tally check itself: clean on the whole real file
+    _t37 = build_tally_check(_r37)
+    check("Full-file tally check: zero mismatches across every brand/period", len(_t37) == 0,
+          f"{len(_t37)} mismatches" if len(_t37) else "")
+
+    # The tally check must actually DETECT a planted corruption
+    _bad37 = _r37.copy()
+    _mask37 = ((_bad37.State_Zone == "Gujarat") & (_bad37.Urban_Rural == "U+R")
+               & (_bad37.Flag == "Category") & (_bad37.TG_Segment == "TOTAL"))
+    _bad37.loc[_mask37, _c37] = _bad37.loc[_mask37, _c37] + 5000
+    _t37b = build_tally_check(_bad37)
+    check("Tally check detects a planted 5000-unit corruption", len(_t37b) >= 1)
+    check("Tally check names the corrupted state and metric",
+          len(_t37b) >= 1 and (_t37b.iloc[0]["State_Zone"] == "Gujarat")
+          and (_t37b.iloc[0]["Metric"] == "Units Estd"))
+
+# Ground-truth protection is implicitly re-verified by Groups 2-3 above, but
+# assert explicitly that Format A's own tally is also clean end to end.
+_mA37, _ = process_all_files({"SHC": RAW}, verbose=False)
+_rA37, _, _, _ = add_calculations(_mA37)
+check("Format A (Rajasthan) tally check also fully clean", len(build_tally_check(_rA37)) == 0)
+
+
+
+print("=" * 70)
+print("TEST GROUP 38: Multi-format runs tally (the deployed 12,784-failure bug)")
+print("=" * 70)
+_SHC38 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC38) and os.path.exists(FORMAT_B_FILE) and os.path.exists(FORMAT_C_FILE):
+    _frames38 = []
+    _m38a, _ = process_all_files({"SHC-A": RAW, "SHC-M": _SHC38, "Creme": FORMAT_B_FILE}, verbose=False)
+    _frames38.append(_m38a)
+    for _fmt38, _sh38 in {
+        "SHC-C": {"Maharashtra(U+R) - SHC", "Maharasthra(R) - SHC", "Maharasthra(U) - SHC"},
+        "KM-C":  {"Maharasthra(U+R) - Pwd KM", "Maharasthra(R) - Pwd KM", "Maharasthra(U) - Pwd KM"},
+    }.items():
+        _d38, _ = process_workbook(FORMAT_C_FILE, _fmt38, included_sheet_names=_sh38)
+        _d38["State_Zone"] = "Maharashtra"
+        _frames38.append(_d38)
+    _mm38 = pd.concat(_frames38, ignore_index=True)
+    _rr38, _, _, _ = add_calculations(_mm38)
+    _t38 = build_tally_check(_rr38)
+    check("Multi-format run (A + monthly + B + C together): ZERO tally mismatches",
+          len(_t38) == 0, f"{len(_t38)} mismatches" if len(_t38) else "")
+
+    # The exact row that failed in the deployed app must tally
+    _ph38 = _rr38[(_rr38.State_Zone == "Punjab_Haryana")
+                  & (_rr38.Brand_SKU_Item == "ANY HAIR COL.SHAMPOO")
+                  & (_rr38.TG_Segment == "TOTAL")]
+    _c38 = "Sales Derived__2025 Jun"
+    _u38 = _ph38[_ph38.Urban_Rural == "U"][_c38].sum()
+    _r38v = _ph38[_ph38.Urban_Rural == "R"][_c38].sum()
+    _ur38 = _ph38[_ph38.Urban_Rural == "U+R"][_c38].sum()
+    check("Punjab_Haryana (the deployed failure row) tallies in multi-format run",
+          abs(_ur38 - (_u38 + _r38v)) < 1)
+
+    # The monthly format's own numbers must be IDENTICAL whether it runs alone
+    # or alongside other formats - no cross-format contamination.
+    _alone38, _ = process_all_files({"SHC-M": _SHC38}, verbose=False)
+    _ra38, _, _, _ = add_calculations(_alone38)
+    _key38 = ["State_Zone", "Urban_Rural", "TG_Segment", "Flag", "Brand_SKU_Item"]
+    _cmp_cols38 = [c for c in _ra38.columns if c.startswith("Sales Derived__2025")]
+    _a38 = _ra38[_ra38.Format == "SHC-M"].set_index(_key38)[_cmp_cols38].sort_index()
+    _b38 = _rr38[_rr38.Format == "SHC-M"].set_index(_key38)[_cmp_cols38].sort_index()
+    _common38 = _a38.index.intersection(_b38.index)
+    _same38 = (_a38.loc[_common38].fillna(0) - _b38.loc[_common38].fillna(0)).abs().max().max() < 0.01
+    check("Monthly file identical alone vs in a multi-format run (no contamination)", _same38)
+
+
+
+print("=" * 70)
+print("TEST GROUP 39: GODREJ-named brands always attributed to Godrej")
+print("=" * 70)
+from cleaner import classify_company as _cc39
+
+check("Unmapped 'GODREJ EXPERT RICH CREME' -> GODREJ CONSUMER PRODS",
+      _cc39("GODREJ EXPERT RICH CREME", "Brand") == "GODREJ CONSUMER PRODS")
+check("Unmapped 'GODREJ FASHION COLOUR' -> GODREJ CONSUMER PRODS",
+      _cc39("GODREJ FASHION COLOUR", "Brand") == "GODREJ CONSUMER PRODS")
+check("Non-Godrej unmapped brand still goes to Others / Unmapped",
+      _cc39("STREAX HAIR COLOUR", "Brand") == "Others / Unmapped")
+check("Explicit mapping still wins over the GODREJ rule",
+      _cc39("GODREJ LICENSED TO SOMEONE", "Brand",
+            company_overrides={"GODREJ LICENSED TO SOMEONE": "OTHER CO"}) == "OTHER CO")
+check("Category rows unaffected (still Category Total)",
+      _cc39("ANY GODREJ THING", "Category") == "Category Total")
+
+_SHC39 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC39):
+    _m39, _ = process_all_files({"SHC": _SHC39}, verbose=False)
+    _r39, _, _, _ = add_calculations(_m39)
+    _gu39 = _r39[_r39.Brand_SKU_Item.str.contains("GODREJ", case=False, na=False)]
+    check("No GODREJ-named brand row lands in Others / Unmapped",
+          not (_gu39[_gu39.Flag.isin(["Brand", "Others"])]["Company"] == "Others / Unmapped").any())
+    _cs39 = build_company_summary(_r39)
+    _all39 = _cs39[(_cs39.State_Zone == "All India") & (_cs39.Urban_Rural == "U+R") & (_cs39.TG_Segment == "TOTAL")]
+    check("Company shares still sum to ~100% after the rule",
+          abs(_all39["Value MS%__2026 May"].sum() * 100 - 100) < 0.5)
+
+
+
+print("=" * 70)
+print("TEST GROUP 40: Same-name multi-grammage rows (the remaining 314 failures)")
+print("=" * 70)
+import pandas as _pd40
+
+def _mk40(state, ur, brand, grammage, hh, val, flag="Brand"):
+    return {"Format": "HC", "Region_Raw": f"{state} ({ur})", "State_Zone": state, "Is_Zone": False,
+            "Urban_Rural": ur, "TG_Segment": "TOTAL", "Flag": flag, "Company": "X", "Grammage": grammage,
+            "SU": None, "Brand_SKU_Item": brand, "HH__Monthly": hh, "Vol__Monthly": hh * 2,
+            "Val__Monthly": val, "Avg NOP__Monthly": 1.5}
+
+_rows40 = []
+for _ur40, _hh40, _val40 in [("U", 100, 50), ("R", 60, 30), ("U+R", 160, 80)]:
+    _rows40.append(_mk40("TestState", _ur40, "ANY HC", "", _hh40, _val40, flag="Category"))
+for _ur40 in ["U", "R", "U+R"]:
+    _b40 = {"U": (10, 5), "R": (6, 3), "U+R": (16, 8)}[_ur40]
+    _rows40.append(_mk40("TestState", _ur40, "BLACK ROSE KALI MEHANDI", "40 G", _b40[0], _b40[1]))
+    _rows40.append(_mk40("TestState", _ur40, "BLACK ROSE KALI MEHANDI", "80 G", _b40[0] * 2, _b40[1] * 2))
+_m40 = _pd40.DataFrame(_rows40)
+_fl40 = {("TestState", "U"): 1.0, ("TestState", "R"): 1.0, ("TestState", "U+R"): 1.0}
+_r40, _, _, _ = add_calculations(_m40, factor_lookup=_fl40)
+
+_b40df = _r40[(_r40.Brand_SKU_Item == "BLACK ROSE KALI MEHANDI") & (_r40.Urban_Rural == "U+R")
+              & (_r40.State_Zone == "TestState")]
+_g40 = dict(zip(_b40df["Grammage"].fillna("").astype(str).str.strip(), _b40df["Sales Derived__Monthly"]))
+check("40G grammage row: U+R = its own U + R (8M), not the brand total",
+      abs(_g40.get("40 G", 0) - 8_000_000) < 1, f"got {_g40}")
+check("80G grammage row: U+R = its own U + R (16M), not the brand total",
+      abs(_g40.get("80 G", 0) - 16_000_000) < 1)
+check("Grammage rows tally clean", len(build_tally_check(_r40)) == 0)
+check("No leftover __pair_ temp columns in the result",
+      not any(c.startswith("__pair_") for c in _r40.columns))
+
+# The tally check must DETECT corruption even with duplicate brand names
+_bad40 = _r40.copy()
+_mask40 = ((_bad40.Brand_SKU_Item == "BLACK ROSE KALI MEHANDI") & (_bad40.Urban_Rural == "U+R")
+           & (_bad40.State_Zone == "TestState"))
+_bad40.loc[_mask40, "Sales Derived__Monthly"] = _bad40.loc[_mask40, "Sales Derived__Monthly"] * 2
+_t40 = build_tally_check(_bad40)
+check("Tally check detects corruption on duplicate-name rows (was a false negative)",
+      len(_t40) >= 1)
+
+
+
+print("=" * 70)
+print("TEST GROUP 41: Period-split sheets collapse to one row (2x/3x tally bug)")
+print("=" * 70)
+import pandas as _pd41
+
+def _mk41(state, ur, brand, period_col, hh, val, flag="Brand"):
+    _row41 = {"Format": "HC", "Region_Raw": f"{state} ({ur}) {period_col}", "State_Zone": state,
+              "Is_Zone": False, "Urban_Rural": ur, "TG_Segment": "TOTAL", "Flag": flag,
+              "Company": "X", "Grammage": None, "SU": None, "Brand_SKU_Item": brand,
+              "HH__Monthly": None, "Val__Monthly": None, "Avg NOP__Monthly": None,
+              "HH__MAT Apr": None, "Val__MAT Apr": None, "Avg NOP__MAT Apr": None,
+              "HH__MAT May": None, "Val__MAT May": None, "Avg NOP__MAT May": None}
+    _row41[f"HH__{period_col}"] = hh
+    _row41[f"Val__{period_col}"] = val
+    _row41[f"Avg NOP__{period_col}"] = 1.5
+    return _row41
+
+_rows41 = []
+for _p41 in ["Monthly", "MAT Apr", "MAT May"]:
+    for _ur41, _hh41, _val41 in [("U", 100, 50), ("R", 60, 30), ("U+R", 160, 80)]:
+        _rows41.append(_mk41("AP excl Tela", _ur41, "ANY HC", _p41, _hh41, _val41, flag="Category"))
+        _b41 = {"U": (10, 0.2), "R": (6, 0.1), "U+R": (16, 0.3)}[_ur41]
+        _rows41.append(_mk41("AP excl Tela", _ur41, "ADORE HENNA", _p41, _b41[0], _b41[1]))
+# a brand on only 2 of the 3 period sheets (the 2x cases from the failure table)
+for _p41 in ["Monthly", "MAT Apr"]:
+    for _ur41 in ["U", "R", "U+R"]:
+        _b41 = {"U": (4, 0.05), "R": (2, 0.03), "U+R": (6, 0.08)}[_ur41]
+        _rows41.append(_mk41("AP excl Tela", _ur41, "AFRIN HENNA", _p41, _b41[0], _b41[1]))
+
+_m41 = _pd41.DataFrame(_rows41)
+_fl41 = {("AP excl Tela", "U"): 1.0, ("AP excl Tela", "R"): 1.0, ("AP excl Tela", "U+R"): 1.0}
+_r41, _, _, _ = add_calculations(_m41, factor_lookup=_fl41)
+
+_a41 = _r41[(_r41.Brand_SKU_Item == "ADORE HENNA") & (_r41.State_Zone == "AP excl Tela")]
+check("3 period-split raw rows per cut collapse to exactly 1 row per cut",
+      len(_a41) == 3 and set(_a41.Urban_Rural) == {"U", "R", "U+R"}, f"rows={len(_a41)}")
+_ur41v = _a41[_a41.Urban_Rural == "U+R"]["Sales Derived__Monthly"].iloc[0]
+check("U+R Monthly = U + R exactly (300k), NOT tripled (900k)",
+      abs(_ur41v - 300000) < 1, f"got {_ur41v:,.0f}")
+check("All three period columns populated on the single collapsed row",
+      _a41[_a41.Urban_Rural == "U+R"][["Sales Derived__Monthly", "Sales Derived__MAT Apr",
+                                        "Sales Derived__MAT May"]].notna().all().all())
+_f41 = _r41[(_r41.Brand_SKU_Item == "AFRIN HENNA") & (_r41.Urban_Rural == "U+R")
+            & (_r41.State_Zone == "AP excl Tela")]["Sales Derived__Monthly"].iloc[0]
+check("2-sheet brand: U+R = U + R exactly (80k), NOT doubled",
+      abs(_f41 - 80000) < 1, f"got {_f41:,.0f}")
+check("Period-split scenario tallies clean end to end",
+      len(build_tally_check(_r41)) == 0)
+
+
+
+print("=" * 70)
+print("TEST GROUP 42: Coverage messages explain the raw file; R-only mirror rule")
+print("=" * 70)
+import pandas as _pd42
+
+_SHC42 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+if os.path.exists(_SHC42):
+    _m42, _ = process_all_files({"SHC": _SHC42}, verbose=False)
+    _r42, _, _, _ = add_calculations(_m42)
+    _cov42 = build_rollup_coverage(_r42)
+    _gap42 = _cov42[(_cov42.Rollup == "All India") & (_cov42.Urban_Rural == "R")].iloc[0]
+    _d42 = _gap42["Missing_Detail"]
+    check("Coverage detail names the raw file as the source of the gap",
+          "raw file has Urban only" in _d42 and "no Rural sheet exists" in _d42)
+    check("Coverage detail states what the model did (U+R = Urban)",
+          "U+R = Urban" in _d42 and "IS counted in U and U+R rollups" in _d42)
+    check("Coverage detail covers both Delhi and Guwahati",
+          "Delhi" in _d42 and "Guwahati" in _d42)
+    _full42 = _cov42[(_cov42.Rollup == "All India") & (_cov42.Urban_Rural == "U")].iloc[0]
+    check("Fully-covered cuts have empty detail (no noise)",
+          _full42["Missing_Detail"] == "" and _full42["Missing_States"] == "")
+
+# R-only mirror: a state with ONLY Rural gets U+R = R
+def _mk42(state, ur, brand, hh, val, flag="Brand"):
+    return {"Format": "T", "Region_Raw": f"{state} ({ur})", "State_Zone": state, "Is_Zone": False,
+            "Urban_Rural": ur, "TG_Segment": "TOTAL", "Flag": flag, "Company": "X",
+            "Grammage": None, "SU": None, "Brand_SKU_Item": brand,
+            "HH__M1": hh, "Vol__M1": hh * 2, "Val__M1": val, "Avg NOP__M1": 1.5}
+
+_rows42 = [
+    _mk42("RuralOnlyState", "R", "ANY T", 60, 30, flag="Category"),
+    _mk42("RuralOnlyState", "R", "BRAND X", 6, 3),
+]
+_mm42 = _pd42.DataFrame(_rows42)
+_rr42, _, _, _ = add_calculations(_mm42, factor_lookup={("RuralOnlyState", "R"): 1.0})
+_urrow42 = _rr42[(_rr42.State_Zone == "RuralOnlyState") & (_rr42.Urban_Rural == "U+R")
+                 & (_rr42.Flag == "Category")]
+check("R-only state: U+R row synthesized", len(_urrow42) == 1)
+check("R-only state: U+R = R exactly (mirror of the urban-only rule)",
+      len(_urrow42) == 1 and abs(_urrow42["Sales Derived__M1"].iloc[0] - 30_000_000) < 1)
+_ai42 = _rr42[(_rr42.State_Zone == "All India") & (_rr42.Urban_Rural == "U+R") & (_rr42.Flag == "Category")]
+check("R-only state included in All India U+R", len(_ai42) == 1
+      and abs(_ai42["Sales Derived__M1"].iloc[0] - 30_000_000) < 1)
+check("R-only scenario tallies clean", len(build_tally_check(_rr42)) == 0)
+
+
+
+print("=" * 70)
+print("TEST GROUP 43: Two-tier period header (HC Monthly/MAT Apr/MAT May bug)")
+print("=" * 70)
+from cleaner import find_header_rows as _fhr43, build_column_map as _bcm43
+
+# Synthetic two-tier header: metric row 'HH', then a SPARSE group-label row
+# ('Monthly' / 'MAT Apr' / 'MAT MAY' at only 3 of 30 data columns), then the
+# real per-column period names one row further down. This is the exact shape
+# of the real HC file (1 id column + 30 data columns: 24 months + 3 MAT Apr
+# + 3 MAT May), reproduced as a fixture so the regression is protected even
+# without the (very large) real file present. All rows are the SAME length
+# (31 = 1 id col + 30 data cols) - a prior version of this fixture had
+# mismatched row lengths (30 vs 31), which silently truncated the real
+# period row and caused false failures in this very test.
+_id43 = 1
+_month_labels43 = ["2023 Jun", "2023 Jul", "2023 Aug", "2023 Sep", "2023 Oct", "2023 Nov", "2023 Dec",
+                   "2024 Jan", "2024 Feb", "2024 Mar", "2024 Apr", "2024 May", "2024 Jun", "2024 Jul",
+                   "2024 Aug", "2024 Sep", "2024 Oct", "2024 Nov", "2024 Dec", "2025 Jan", "2025 Feb",
+                   "2025 Mar", "2025 Apr", "2025 May"]  # 24 real months
+assert len(_month_labels43) == 24
+_metric43 = [None, "HH"] + [None] * 29
+_group43 = [None, "Monthly"] + [None] * 23 + ["MAT Apr"] + [None] * 2 + ["MAT MAY"] + [None] * 2
+_real43 = [None] + _month_labels43 + ["MAT Apr\'24", "MAT Apr\'25", "MAT Apr\'26",
+                                       "MAT May\'24", "MAT May\'25", "MAT May\'26"]
+_data43 = [" ANY HC "] + [100 + i for i in range(30)]
+for _row43 in (_metric43, _group43, _real43, _data43):
+    assert len(_row43) == 31, len(_row43)
+_rows43 = [(None,) * 31] * 5 + [tuple(_metric43), tuple(_group43), tuple(_real43), tuple(_data43)]
+
+_mi43, _pi43 = _fhr43(_rows43, id_cols=_id43)
+check("Two-tier header: metric row still found correctly", _mi43 == 5)
+check("Two-tier header: period row correctly resolved to the REAL row (skipping the sparse group row)",
+      _pi43 == 7, f"got period_header_row_idx={_pi43} (group row is at 6, real row is at 7)")
+
+_cols43 = _bcm43(_rows43, id_cols=_id43)
+_names43 = [c for c in _cols43 if c]
+check("All 30 real period columns recovered (not just 2 group labels)", len(_names43) == 30)
+check("Most recent real month '2025 May' is present (was silently dropped before)",
+      "HH__2025 May" in _names43)
+check("Most recent MAT figure 'MAT May'26' is present (was silently dropped before)",
+      "HH__MAT May'26" in _names43)
+check("Oldest month '2023 Jun' still present (nothing lost, only recovered)",
+      "HH__2023 Jun" in _names43)
+
+# Single-tier files (Creme/Henna/SHC shape) must be completely unaffected
+_single43 = [(None,) * 5] * 6 + [(None, "HH", None, None, None),
+                                  (None, "2025 Jun", "2025 Jul", None, None)]
+_mi43b, _pi43b = _fhr43(_single43, id_cols=1)
+check("Single-tier header (Creme/SHC shape) still uses the immediate next row (no regression)",
+      _pi43b == _mi43b + 1)
+
+# End-to-end on the real HC file, if present
+_HC43 = "/mnt/user-data/uploads/HC-_KPI-_Brand_x_format-_Monthly___MAT_Apr___May.xlsx"
+if os.path.exists(_HC43):
+    _m43, _ = process_all_files({"HC": _HC43}, verbose=False)
+    _periods43 = set(c.split("__", 1)[1] for c in _m43.columns if c.startswith("HH__"))
+    check("Real HC file: 2025 May (most recent real month) present", "2025 May" in _periods43)
+    check("Real HC file: MAT Apr'26 and MAT May'26 (most recent MAT figures) present",
+          "MAT Apr'26" in _periods43 and "MAT May'26" in _periods43)
+    check("Real HC file: at least 30 distinct periods recovered (was 3)", len(_periods43) >= 30,
+          f"got {len(_periods43)}")
+
+    _r43, _, _, _ = add_calculations(_m43)
+    check("Real HC file tallies clean end to end (U+R = U + R)", len(build_tally_check(_r43)) == 0)
+
+    # Confirm against the exact known raw values. Checked at STATE level
+    # (Maharashtra), not All India: raw HH/Vol/Val are never rolled up to
+    # All India/zones by design (only the calculated Sales Derived/Units
+    # Estd are - see metric_cols at Tier 3), so an All-India-level raw HH
+    # check would always read NaN regardless of this fix.
+    _cat43 = _r43[(_r43.Flag == "Category") & (_r43.State_Zone == "Maharashtra")
+                  & (_r43.Urban_Rural == "U+R") & (_r43.Brand_SKU_Item == "ANY CREME")]
+    _raw43 = _m43[(_m43.Flag == "Category") & (_m43.State_Zone == "Maharashtra")
+                  & (_m43.Urban_Rural == "U+R") & (_m43.Brand_SKU_Item == "ANY CREME")]
+    if len(_cat43) and len(_raw43):
+        check("ANY CREME (Maharashtra) 2025 May HH matches the raw file exactly",
+              abs(_cat43["HH__2025 May"].iloc[0] - _raw43["HH__2025 May"].iloc[0]) < 0.01)
+        check("ANY CREME (Maharashtra) MAT May'26 HH matches the raw file exactly",
+              abs(_cat43["HH__MAT May'26"].iloc[0] - _raw43["HH__MAT May'26"].iloc[0]) < 0.01)
+
+    # Multi-format: real HC + real SHC together must still tally
+    _SHC43 = "/mnt/user-data/uploads/KPI-SHC_SKUs-_monthly_-_Jun_25_to_May_26.xlsx"
+    if os.path.exists(_SHC43):
+        _mm43, _ = process_all_files({"HC": _HC43, "SHC": _SHC43}, verbose=False)
+        _rr43, _, _, _ = add_calculations(_mm43)
+        check("Real HC + real SHC together: zero tally mismatches",
+              len(build_tally_check(_rr43)) == 0)
+
 print("=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)

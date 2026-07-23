@@ -137,14 +137,53 @@ def find_header_rows(rows, id_cols=5, max_scan=20):
     assumption (always row 4 / row 5) which broke silently - producing
     garbage column names - whenever a raw file had a slightly different
     header layout (an extra or missing row above the data).
+
+    Two-tier header handling: some files (e.g. the HC "Monthly & MAT Apr &
+    May" workbook) insert an EXTRA group-label row between the metric row
+    and the real period names, e.g. a sparse row reading 'Monthly', 'MAT
+    Apr', 'MAT MAY' (each label only appearing once per metric block, with
+    blanks for every other column in that block), with the real per-column
+    names ('2023 Jun', "MAT Apr'26", ...) one row further down. Treating
+    that sparse group row as if it were the period row meant every column
+    whose group-row cell was blank got column name = None and was silently
+    DROPPED - keeping only the OLDEST month and the OLDEST MAT figure in
+    each block while discarding everything newer, including the exact MAT
+    Apr'26 / MAT May'26 figures the file exists to report. Detected here by:
+    the candidate period row being sparse and its few values reading as
+    broad group labels ('monthly' / starts with 'mat '), while the row
+    beneath it is dense with real period-looking text - in which case that
+    deeper row is used instead. Deliberately narrow (checks label content,
+    not just sparsity) so a genuinely sparse-but-real period row (e.g. a
+    file with only a few quarters) is never mistaken for a group-label row.
     Returns (metric_header_row_idx, period_header_row_idx) or (None, None)
     if no 'HH' label is found within the scanned rows.
     """
+    GROUP_LABEL_WORDS = ("monthly", "quarterly", "annual", "mat ")
+
+    def _looks_like_group_label(v):
+        s = str(v).strip().lower()
+        return s == "monthly" or s.startswith(GROUP_LABEL_WORDS)
+
     for i in range(min(max_scan, len(rows))):
         row = rows[i]
         for cell in row[id_cols:id_cols + 3]:
             if cell is not None and str(cell).strip().upper() == "HH":
-                return i, i + 1
+                candidate_idx = i + 1
+                if candidate_idx + 1 < len(rows):
+                    candidate_row = rows[candidate_idx]
+                    deeper_row = rows[candidate_idx + 1]
+                    cand_vals = [v for v in candidate_row[id_cols:] if v is not None]
+                    deeper_vals = [v for v in deeper_row[id_cols:] if v is not None]
+                    total_cols = max(len(candidate_row) - id_cols, 1)
+                    is_sparse_group_row = (
+                        len(cand_vals) > 0
+                        and len(cand_vals) < 0.5 * total_cols
+                        and all(_looks_like_group_label(v) for v in cand_vals)
+                        and len(deeper_vals) > max(2 * len(cand_vals), 0.6 * total_cols)
+                    )
+                    if is_sparse_group_row:
+                        return i, candidate_idx + 1
+                return i, candidate_idx
     return None, None
 
 
@@ -250,6 +289,15 @@ def classify_company(product_name, flag, company_overrides=None):
     name = str(product_name).strip()
     if company_overrides and name in company_overrides:
         return company_overrides[name]
+
+    # Safety net: any product with GODREJ in its name is Godrej's own, always.
+    # Without this, a Godrej brand missing from the mapping silently falls
+    # into 'Others / Unmapped' and UNDERSTATES Godrej's share - the single
+    # worst failure mode for this model's owner. An explicit mapping above
+    # still wins if someone ever needs to override it. Subtotal rows are
+    # excluded from company sums elsewhere, so this cannot double count.
+    if "GODREJ" in name.upper():
+        return "GODREJ CONSUMER PRODS"
 
     return "Others / Unmapped"
 

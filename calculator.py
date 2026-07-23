@@ -327,6 +327,38 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     zero_factor_regions = set()
     unmapped_zones = set()
 
+    # ---- Tier 0: collapse duplicate-identity rows ----
+    # Some production files (e.g. the HC "Monthly & MAT Apr & May" workbook)
+    # split one logical row across SEVERAL sheets: the same brand appears as
+    # 2-3 rows, each carrying a different period's columns (one sheet holds
+    # Monthly, another MAT Apr, another MAT May). Left as-is, every later
+    # stage counts that brand 2-3 times: the U+R sum got stamped onto each
+    # duplicate and rollups multiplied it (the exact 2x/3x tally failures).
+    # Collapsing here, before ANY calculation, makes duplicates structurally
+    # impossible downstream. sum(min_count=1) coalesces disjoint period
+    # columns; for the vast majority of files (Formats A/B/C with one row per
+    # identity) every group has exactly 1 row and this is a pure no-op,
+    # which is why the Format A ground-truth match is unaffected.
+    _raw_metric_cols = [c for c in df.columns if "__" in c]
+    if _raw_metric_cols:
+        _collapse_key = [c for c in ["Format", "State_Zone", "Is_Zone", "Urban_Rural",
+                                     "TG_Segment", "Flag", "Company", "Brand_SKU_Item"]
+                         if c in df.columns]
+        for _ck in ["Grammage", "SU"]:
+            if _ck in df.columns:
+                df[f"__collapse_{_ck}"] = df[_ck].fillna("").astype(str).str.strip()
+                _collapse_key.append(f"__collapse_{_ck}")
+        _other_cols = [c for c in df.columns
+                       if c not in _raw_metric_cols and c not in _collapse_key
+                       and not c.startswith("__collapse_")]
+        _agg = {c: "sum" for c in _raw_metric_cols} | {c: "first" for c in _other_cols}
+        _before_n = len(df)
+        df = (df.groupby(_collapse_key, dropna=False, sort=False)
+                .agg({k: (lambda s: s.sum(min_count=1)) if v == "sum" else "first"
+                      for k, v in _agg.items()})
+                .reset_index())
+        df = df.drop(columns=[c for c in df.columns if c.startswith("__collapse_")])
+
     # Any Is_Zone=True rows, and any "All India" rows, are ignored entirely
     # for calculation purposes - both are always synthesized as a rollup of
     # real states, never calculated from their own sheet.
@@ -347,16 +379,48 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     u_indexed = u_df.set_index(ID_COLS)
     r_indexed = r_df.set_index(ID_COLS)
 
-    common_keys = u_indexed.index.intersection(r_indexed.index)
-    derived_ur = u_indexed.loc[common_keys, metric_cols].add(
-        r_indexed.loc[common_keys, metric_cols].values
-    )
-    derived_ur = derived_ur.reset_index()
-    derived_ur["Urban_Rural"] = "U+R"
+    # U+R is ALWAYS the sum of whatever U and R rows exist for the same
+    # identity (both if both exist, just U for urban-only rows, just R for
+    # rural-only rows). This is a hard guarantee: a U+R value that doesn't
+    # tally with its own U and R rows must be impossible by construction.
+    #
+    # History of why: the previous implementation summed only the U-and-R
+    # intersection, and any raw U+R row it failed to pair fell back to being
+    # computed from the raw U+R sheet's own HH/AvgNOP with an AVERAGED
+    # factor ((U+R)/2). That fallback silently produced numbers that did not
+    # equal U + R (e.g. Gujarat Units Estd Dec: 874,520 from the fallback vs
+    # the correct 878,819 = U + R), and whether it triggered depended on
+    # fragile key alignment that differed between sessions. The raw-sheet
+    # fallback is now used ONLY when a raw U+R row has no U row and no R row
+    # at all to sum from.
+    # Pair U/R rows with U+R rows on the FULL row identity, including
+    # Grammage and SU. Production files (e.g. HC) contain several rows that
+    # share the same Brand_SKU_Item and differ only by Grammage; pairing
+    # without Grammage collapsed all of a brand's grammage rows into one sum
+    # and stamped that TOTAL onto every one of its U+R grammage rows -
+    # inflating each of them (the 314-datapoint tally failure). Grammage and
+    # SU are normalized (NaN -> '', stripped) purely for the pairing so blank
+    # vs missing can never break a match; stored values are untouched.
+    extra_pair_cols = [c for c in ["Grammage", "SU"] if c in non_ur_df.columns]
+    pair_cols = ID_COLS + [f"__pair_{c}" for c in extra_pair_cols]
+    for frame in (non_ur_df, ur_raw_df):
+        for c in extra_pair_cols:
+            frame[f"__pair_{c}"] = frame[c].fillna("").astype(str).str.strip()
 
-    ur_raw_df = ur_raw_df.merge(derived_ur, on=ID_COLS + ["Urban_Rural"], how="left", suffixes=("", ""))
+    sum_ur = non_ur_df.groupby(pair_cols, dropna=False)[metric_cols].sum(min_count=1).reset_index()
+    sum_ur["Urban_Rural"] = "U+R"
 
-    missing_ur_mask = ur_raw_df["Units Estd__" + periods[0]].isna() if periods else pd.Series(False, index=ur_raw_df.index)
+    ur_raw_df = ur_raw_df.merge(sum_ur, on=pair_cols + ["Urban_Rural"], how="left", suffixes=("", ""))
+
+    # A raw U+R row genuinely missed the sum-merge only if ALL its metric
+    # columns are blank. Never test just one period column: in a multi-format
+    # run the period columns span every format, and a monthly row is
+    # legitimately blank in another format's quarterly column. The old check
+    # used periods[0] alone, so in any multi-file run every row of a format
+    # that didn't own periods[0] was falsely treated as missed and its
+    # correct summed U+R was overwritten by the raw-sheet fallback - the
+    # exact source of the mass tally failures.
+    missing_ur_mask = ur_raw_df[metric_cols].isna().all(axis=1) if metric_cols else pd.Series(False, index=ur_raw_df.index)
     if missing_ur_mask.any():
         fallback = ur_raw_df[missing_ur_mask].drop(columns=metric_cols)
         _compute_units_sales(fallback, factor_lookup, default_factor, missing_factor_regions, zero_factor_regions)
@@ -370,6 +434,7 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     # and Guwahati" issue Sagar raised. We synthesize a full U+R row (copy of
     # the U row, relabelled) ONLY for states that have NO Rural row anywhere,
     # so a state with both U and R is never touched and this can't double count.
+    states_with_u = set(u_df["State_Zone"].unique())
     states_with_r = set(r_df["State_Zone"].unique())
     states_with_raw_ur = set(ur_raw_df["State_Zone"].unique())
     u_only = u_df[
@@ -381,6 +446,24 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
         u_only_ur = u_only.copy()
         u_only_ur["Urban_Rural"] = "U+R"
         ur_raw_df = pd.concat([ur_raw_df, u_only_ur], ignore_index=True)
+
+    # Mirror case: a state with ONLY a Rural sheet (no Urban, no raw U+R).
+    # Then rural IS the market total, so U+R = R, symmetric with the
+    # urban-only rule above. No current file has this shape, but the rule
+    # must be symmetric rather than silently dropping such a state from
+    # every U+R rollup.
+    r_only = r_df[
+        (~r_df["State_Zone"].isin(states_with_u))
+        & (~r_df["State_Zone"].isin(states_with_raw_ur))
+    ]
+    if len(r_only) > 0:
+        r_only_ur = r_only.copy()
+        r_only_ur["Urban_Rural"] = "U+R"
+        ur_raw_df = pd.concat([ur_raw_df, r_only_ur], ignore_index=True)
+
+    # Drop the temporary pairing columns before assembling the result.
+    for frame in (non_ur_df, ur_raw_df):
+        frame.drop(columns=[c for c in frame.columns if c.startswith("__pair_")], inplace=True, errors="ignore")
 
     state_result = pd.concat([non_ur_df, ur_raw_df], ignore_index=True)
 
@@ -438,6 +521,69 @@ def add_calculations(df, factor_lookup=None, default_factor=1.0, zone_mapping=No
     return result, missing_factor_regions, unmapped_zones, zero_factor_regions
 
 
+def build_tally_check(result_df, tolerance=1.0):
+    """
+    Automatic QC: for every state that has U and/or R rows, verify that the
+    U+R row's additive metrics (Units Estd, Sales Derived) equal the sum of
+    the U and R rows, per identity, per period. Returns a DataFrame of every
+    mismatch beyond `tolerance` (absolute). Empty DataFrame = fully tallies.
+
+    Runs on every pipeline run and is exported into the Excel, so a
+    non-tallying number can never ship silently. Zones and All India are
+    covered implicitly: they are sums of state rows, so if states tally,
+    rollups tally.
+    """
+    cols = ["Format", "State_Zone", "TG_Segment", "Flag", "Brand_SKU_Item",
+            "Metric", "Period", "U_plus_R", "UR_row", "Difference"]
+    if result_df is None or len(result_df) == 0:
+        return pd.DataFrame(columns=cols)
+
+    is_zone = result_df["Is_Zone"] == True if "Is_Zone" in result_df.columns else pd.Series(False, index=result_df.index)  # noqa: E712
+    states = result_df[(~is_zone) & (result_df["State_Zone"] != "All India")]
+
+    metric_cols = [c for c in states.columns
+                   if c.startswith("Units Estd__") or c.startswith("Sales Derived__")]
+    if not metric_cols:
+        return pd.DataFrame(columns=cols)
+
+    key = ["Format", "State_Zone", "TG_Segment", "Flag", "Brand_SKU_Item"]
+    # Include Grammage/SU in the identity (normalized) so rows that share a
+    # brand name but differ by grammage are checked individually. Comparing
+    # GROUP SUMS on both sides (rather than row-by-row label alignment) also
+    # makes duplicated keys impossible to hide behind: if each duplicate U+R
+    # row were wrongly stamped with the full total, the U+R group sum would
+    # exceed the U/R group sum and be flagged.
+    states = states.copy()
+    for c in ["Grammage", "SU"]:
+        if c in states.columns:
+            states[f"__k_{c}"] = states[c].fillna("").astype(str).str.strip()
+            key.append(f"__k_{c}")
+
+    ur_rows = states[states["Urban_Rural"] == "U+R"].groupby(key, dropna=False)[metric_cols].sum(min_count=1)
+    sum_rows = (states[states["Urban_Rural"].isin(["U", "R"])]
+                .groupby(key, dropna=False)[metric_cols].sum(min_count=1))
+
+    common = ur_rows.index.intersection(sum_rows.index)
+    display_key = ["Format", "State_Zone", "TG_Segment", "Flag", "Brand_SKU_Item"]
+    records = []
+    for c in metric_cols:
+        expected = sum_rows.loc[common, c]
+        actual = ur_rows.loc[common, c]
+        diff = (actual - expected).abs()
+        bad = diff[diff.fillna(0) > tolerance]
+        metric, period = c.split("__", 1)
+        for idx, d in bad.items():
+            rec = dict(zip(key, idx if isinstance(idx, tuple) else (idx,)))
+            rec = {k: v for k, v in rec.items() if not k.startswith("__k_")}
+            rec.update({
+                "Metric": metric, "Period": period,
+                "U_plus_R": expected.loc[idx], "UR_row": actual.loc[idx],
+                "Difference": d,
+            })
+            records.append(rec)
+    return pd.DataFrame(records, columns=cols)
+
+
 def build_rollup_coverage(result_df, zone_mapping=None):
     """
     Reports, for every rollup (All India and each mapped Zone) at every U/R
@@ -463,7 +609,7 @@ def build_rollup_coverage(result_df, zone_mapping=None):
     zone.
     """
     cols = ["Format", "Rollup", "Urban_Rural", "States_Included",
-            "States_Expected", "Missing_States"]
+            "States_Expected", "Missing_States", "Missing_Detail"]
     if result_df is None or len(result_df) == 0:
         return pd.DataFrame(columns=cols)
     zone_mapping = zone_mapping or {}
@@ -471,6 +617,30 @@ def build_rollup_coverage(result_df, zone_mapping=None):
     df = result_df
     is_zone = df["Is_Zone"] == True if "Is_Zone" in df.columns else pd.Series(False, index=df.index)  # noqa: E712
     states_df = df[(~is_zone) & (df["State_Zone"] != "All India")]
+
+    def _describe_missing(fsub, missing_states, ur_cut):
+        """Plain-language, per-state explanation of WHY a state is absent
+        from a rollup cut: what the raw file actually contains for it, and
+        what the model therefore did. Written for a reader who should never
+        have to guess whether the model dropped data or the data never
+        existed."""
+        parts = []
+        for st in missing_states:
+            cuts = set(fsub[fsub["State_Zone"] == st]["Urban_Rural"].unique())
+            if cuts == {"U", "U+R"} or cuts == {"U"}:
+                parts.append(f"{st} (raw file has Urban only - no Rural sheet exists; "
+                             f"the model set its U+R = Urban, so it IS counted in U and U+R rollups; "
+                             f"it is absent only from Rural because no Rural data was ever supplied)")
+            elif cuts == {"R", "U+R"} or cuts == {"R"}:
+                parts.append(f"{st} (raw file has Rural only - no Urban sheet exists; "
+                             f"the model set its U+R = Rural, so it IS counted in R and U+R rollups; "
+                             f"it is absent only from Urban because no Urban data was ever supplied)")
+            elif ur_cut not in cuts and cuts:
+                parts.append(f"{st} (raw file contains {', '.join(sorted(cuts))} but no {ur_cut} sheet)")
+            else:
+                parts.append(f"{st} (present in the data but excluded from this cut - REVIEW: "
+                             f"this is the dangerous case, e.g. a de-selected sheet)")
+        return "; ".join(parts)
 
     rows = []
     for fmt in sorted(states_df["Format"].dropna().unique()):
@@ -485,6 +655,7 @@ def build_rollup_coverage(result_df, zone_mapping=None):
                 "Format": fmt, "Rollup": "All India", "Urban_Rural": ur,
                 "States_Included": len(present), "States_Expected": len(all_states),
                 "Missing_States": ", ".join(missing),
+                "Missing_Detail": _describe_missing(fsub, missing, ur),
             })
             for zone, members in zone_mapping.items():
                 expected = set(members) & all_states
@@ -496,6 +667,7 @@ def build_rollup_coverage(result_df, zone_mapping=None):
                     "Format": fmt, "Rollup": zone, "Urban_Rural": ur,
                     "States_Included": len(contributing), "States_Expected": len(expected),
                     "Missing_States": ", ".join(z_missing),
+                    "Missing_Detail": _describe_missing(fsub, z_missing, ur),
                 })
     return pd.DataFrame(rows, columns=cols)
 
